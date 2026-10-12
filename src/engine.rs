@@ -10,9 +10,8 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// The Craft App Suite as listed on getartcraft.com/apps, plus the launcher.
 pub const SUITE: &[&str] = &[
-    "artcraft",
-    "artcraftx",
     "cadcraft",
     "craft-launcher",
     "deckcraft",

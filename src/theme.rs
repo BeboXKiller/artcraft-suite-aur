@@ -188,9 +188,27 @@ impl Sty {
             Depth::Mono => Style::default().reversed().bold(),
             _ => Style::default()
                 .bg(self.palette.color(Tint::Accent).unwrap_or(Color::Blue))
-                .fg(Color::White)
+                .fg(on_accent(self.palette.depth))
                 .bold(),
         }
+    }
+
+    /// Text style for anything sitting on the accent bar: the dark brand ink.
+    pub fn on_bar(self) -> Style {
+        match self.palette.depth {
+            Depth::Mono => Style::default(),
+            _ => Style::default().fg(on_accent(self.palette.depth)),
+        }
+    }
+}
+
+/// The dark ink used on top of the accent bar (`#101014` in the brand tokens).
+fn on_accent(depth: Depth) -> Color {
+    match depth {
+        Depth::Mono => Color::Reset,
+        Depth::TrueColor => rgb(0x101014),
+        Depth::Ansi256 => Color::Indexed(233),
+        Depth::Ansi16 => Color::Black,
     }
 }
 
@@ -250,6 +268,17 @@ mod tests {
         assert_eq!(
             Sty::new(Palette::mono()).hl(),
             Style::default().reversed().bold()
+        );
+    }
+
+    #[test]
+    fn highlight_puts_dark_ink_on_the_accent_bar() {
+        assert_eq!(
+            Sty::new(Palette::of(Depth::TrueColor)).hl(),
+            Style::default()
+                .bg(Color::Rgb(0x2d, 0x81, 0xff))
+                .fg(Color::Rgb(0x10, 0x10, 0x14))
+                .bold()
         );
     }
 }

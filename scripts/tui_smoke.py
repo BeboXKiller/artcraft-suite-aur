@@ -156,6 +156,8 @@ checks = [
     ("status line rendered", "ready" in stages["startup"]),
     ("header summary rendered", "✓ " in stages["startup"] and "↑ " in stages["startup"]),
     ("app list rendered", "Apps (" in stages["startup"]),
+    ("version column uses available width", "artcraft-l…" not in stages["startup"]
+     and "artcraft-launcher" in stages["startup"]),
     ("status phrases rendered", any(
         p in stages["startup"]
         for p in ("up to date", "not installed", "cloned, not built", "behind")

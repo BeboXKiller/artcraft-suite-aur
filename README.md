@@ -50,11 +50,11 @@ full-screen UI: it prints the `--status` format and a hint on stderr, then exits
 │ ArtCraft Suite — install · update · launch the Craft suite                 │
 │ ✓ 1 update ready — u updates wordcraft                                     │   ← status / errors
 └────────────────────────────────────────────────────────────────────────────┘
-┌ Apps (15) · 1 picked ──────────────────────────────────────────────────────┐
-│▶  ■  ✓ photocraft      0.2.0       up to date                              │   ← picked + selected
-│   □  ↑3 wordcraft       0.1.42      3 commits behind                       │
-│   □  ◐ deckcraft       0.3.1       updating…                               │
-│   □  · cadcraft        -           not installed                           │
+┌ Apps (13) · 1 picked ──────────────────────────────────────────────────────┐
+│▶  ■  ✓   photocraft              0.5.0                      up to date       │   ← picked + selected
+│   □  ↑3  wordcraft               0.1.42                     3 commits behind │
+│   □  ◐   deckcraft               0.3.1                      updating…        │
+│   □  ·   cadcraft                -                          not installed    │
 └────────────────────────────────────────────────────────────────────────────┘
 ┌ What's new in wordcraft ───────────────────────────────────────────────────┐
 │ 0.1.42 · 3 commits to pull                                                 │   ← the update's contents
@@ -68,8 +68,8 @@ full-screen UI: it prints the `--status` format and a hint on stderr, then exits
 Every row states its situation twice — a glyph and the same fact in words
 (`✓ up to date`, `↑3 3 commits behind`, `◐ updating…`, `✗ build failed`) — so
 nothing depends on colour alone. A picked row fills its square (`■`) in brand
-blue — ink on the selected row so it stays visible on the accent bar — while
-unpicked rows keep an empty `□`. The header counts the suite at a glance
+blue, and the highlighted row turns every character to dark brand ink on the
+accent bar — focus reads as contrast, not colour. The header counts the suite at a glance
 (`✓ up to date · ↑ behind · · missing`), the status row is the feedback channel
 (queued/running tasks, `✓ installed photocraft (0.2.0)`, `✗ photocraft ·
 installing: build failed`), and the bottom pane answers "what would `u` even

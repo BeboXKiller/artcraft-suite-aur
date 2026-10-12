@@ -107,8 +107,18 @@ fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
 fn draw_list(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
     // borders (2) + highlight symbol (2)
     let inner_w = area.width.saturating_sub(4) as usize;
-    // mark(3) + glyph(5) + repo(16) + version(11) = 35, then " phrase"
+    // Responsive columns: mark(3) + glyph(5) are fixed, the status phrase keeps
+    // an 18-column reserve, and repo + version share the rest — version taking
+    // two thirds of the slack, so the middle column stops being the cut-off one
+    // as the terminal grows. Below 52 usable columns the version hides entirely.
     let show_version = inner_w >= 52;
+    let slack = inner_w.saturating_sub(8 + 16 + 11 + 18);
+    let version_extra = slack * 2 / 3;
+    let (repo_w, version_w) = if show_version {
+        (16 + slack - version_extra, 11 + version_extra)
+    } else {
+        (16 + 11 + slack, 0)
+    };
 
     let vis = app.visible_rows();
     let items: Vec<ListItem> = vis
@@ -117,27 +127,35 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
             let a = &app.apps[idx];
             let (glyph, phrase, tint) = row_state(app, a);
             let selected = idx == app.sel;
+            let bar = s.on_bar();
+            let cell = |t: Tint| if selected { bar } else { s.fg(t) };
             let (mark, mark_style) = if app.picks.contains(&idx) {
-                if selected {
-                    ("■", s.fg(Tint::Ink).bold())
-                } else {
-                    ("■", s.fg(Tint::Accent).bold())
-                }
+                (
+                    "■",
+                    if selected {
+                        bar.bold()
+                    } else {
+                        s.fg(Tint::Accent).bold()
+                    },
+                )
             } else {
-                ("□", s.fg(Tint::Faint))
+                ("□", cell(Tint::Faint))
             };
             let mut spans = vec![
                 Span::styled(format!(" {mark} "), mark_style),
-                Span::styled(format!(" {} ", pad(&glyph, 3)), s.fg(tint)),
-                Span::styled(pad(a.repo, 16), s.bold()),
+                Span::styled(format!(" {} ", pad(&glyph, 3)), cell(tint)),
+                Span::styled(
+                    pad(a.repo, repo_w),
+                    if selected { bar.bold() } else { s.bold() },
+                ),
             ];
             if show_version {
                 spans.push(Span::styled(
-                    pad(a.version.as_deref().unwrap_or("-"), 11),
-                    s.fg(Tint::Muted),
+                    pad(a.version.as_deref().unwrap_or("-"), version_w),
+                    cell(Tint::Muted),
                 ));
             }
-            spans.push(Span::styled(format!(" {phrase}"), s.fg(tint)));
+            spans.push(Span::styled(format!(" {phrase}"), cell(tint)));
             ListItem::new(Line::from(spans))
         })
         .collect();
@@ -459,7 +477,7 @@ mod tests {
             pkg: Some("photocraft".into()),
             cloned: true,
             installed: true,
-            // deliberately wider than the 12-cell version column
+            // deliberately wider than the version column on a 60-column screen
             version: Some("0.5.0 (dev build) with a very long suffix".into()),
             behind: Some(0),
             commits: Vec::new(),
@@ -657,6 +675,33 @@ mod tests {
     }
 
     #[test]
+    fn version_column_grows_with_the_terminal() {
+        let a = app();
+        let narrow = render(&a, 60, 15);
+        let narrow_row = narrow
+            .iter()
+            .find(|r| r.contains("photocraft"))
+            .expect("row present");
+        assert!(
+            narrow_row.contains('…'),
+            "expected truncation at 60: {narrow_row:?}"
+        );
+        let wide = render(&a, 120, 30);
+        let wide_row = wide
+            .iter()
+            .find(|r| r.contains("photocraft"))
+            .expect("row present");
+        assert!(
+            !wide_row.contains('…'),
+            "the middle column must use the extra width: {wide_row:?}"
+        );
+        assert!(
+            wide_row.contains("0.5.0 (dev build) with a very long suffix"),
+            "{wide_row:?}"
+        );
+    }
+
+    #[test]
     fn tiny_terminal_gets_a_polite_message() {
         let rows = render(&app(), 40, 12);
         let joined = rows.join("\n");
@@ -735,6 +780,45 @@ mod tests {
                 assert_eq!(cell.bg, Color::Reset, "bg color at {x},{y}");
             }
         }
+    }
+
+    #[test]
+    fn highlighted_row_text_is_dark_on_the_accent_bar() {
+        let mut a = app();
+        a.palette = Palette::of(Depth::TrueColor);
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| draw(f, &a)).unwrap();
+        let buf = term.backend().buffer();
+        let row_text = |y: u16| {
+            (0..80u16)
+                .map(|x| {
+                    buf.cell((x, y))
+                        .unwrap()
+                        .symbol()
+                        .chars()
+                        .next()
+                        .unwrap_or(' ')
+                })
+                .collect::<String>()
+        };
+        let y = (0..24u16)
+            .find(|&y| row_text(y).contains("photocraft"))
+            .expect("photocraft row");
+        let dark = Color::Rgb(0x10, 0x10, 0x14);
+        let dark_cells = (0..80u16)
+            .filter(|&x| {
+                let cell = buf.cell((x, y)).unwrap();
+                cell.symbol() != " " && cell.fg == dark
+            })
+            .count();
+        assert!(
+            dark_cells > 10,
+            "the highlighted row must be dark ink, got {dark_cells} dark cells"
+        );
+        assert!(
+            (0..80u16).any(|x| buf.cell((x, y)).unwrap().bg == Color::Rgb(0x2d, 0x81, 0xff)),
+            "accent bar missing behind the row"
+        );
     }
 
     #[test]
