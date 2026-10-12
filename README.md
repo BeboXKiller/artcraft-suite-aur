@@ -52,6 +52,7 @@ full-screen UI: it prints the `--status` format and a hint on stderr, then exits
 └────────────────────────────────────────────────────────────────────────────┘
 ┌ Apps (13) · 1 picked ──────────────────────────────────────────────────────┐
 │▶  ■  ✓   photocraft              0.5.0                      up to date       │   ← picked + selected
+│      The open-source image editor you already know how to use.              │   ← opened with →
 │   □  ↑3  wordcraft               0.1.42                     3 commits behind │
 │   □  ◐   deckcraft               0.3.1                      updating…        │
 │   □  ·   cadcraft                -                          not installed    │
@@ -62,14 +63,18 @@ full-screen UI: it prints the `--status` format and a hint on stderr, then exits
 │ f refreshes · u updates                                                    │
 └────────────────────────────────────────────────────────────────────────────┘
  [Space] pick  [Ctrl+Space] pick more  [Enter] open  [u] update  [o] attention
- [j/k] move  [U] update all  [f] fetch  [x] cancel  [?] help  [q] quit
+ [j/k] move  [→] details  [←] close  [f] fetch  [x] cancel  [?] help  [q] quit
+ [U] update all  [a] install all  [r] rescan
 ```
 
 Every row states its situation twice — a glyph and the same fact in words
 (`✓ up to date`, `↑3 3 commits behind`, `◐ updating…`, `✗ build failed`) — so
 nothing depends on colour alone. A picked row fills its square (`■`) in brand
 blue, and the highlighted row turns every character to dark brand ink on the
-accent bar — focus reads as contrast, not colour. The header counts the suite at a glance
+accent bar — focus reads as contrast, not colour. `→` opens an indented
+one-line description of the highlighted app (the official getartcraft.com
+blurb); `←` closes it, and several apps can stay open while you move around.
+The header counts the suite at a glance
 (`✓ up to date · ↑ behind · · missing`), the status row is the feedback channel
 (queued/running tasks, `✓ installed photocraft (0.2.0)`, `✗ photocraft ·
 installing: build failed`), and the bottom pane answers "what would `u` even
@@ -84,6 +89,8 @@ description of what it does, scrolled with `j`/`k` on short terminals.
 | `j` / `k`, `↑` / `↓` | move selection |
 | `PgUp` / `PgDn` | jump 10 rows |
 | `g` / `Home`, `G` / `End` | first / last app |
+| `→` / `l` | open an indented description row under the highlighted app |
+| `←` / `h` | close it again |
 | `Space` | pick the highlighted row (press again on the only pick to clear) |
 | `Ctrl+Space` | add / remove the highlighted row from the picked set |
 | `Enter` | launch the selected app, or install it if missing; on a multi-pick, install every missing one |

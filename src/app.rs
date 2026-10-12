@@ -37,6 +37,8 @@ pub struct App {
     pub failed: HashMap<String, String>,
     /// `o`: show only apps that need attention
     pub filter_attention: bool,
+    /// apps whose description row is open (toggled with → / ←)
+    pub expanded: HashSet<usize>,
     pub msg: String,
     pub quit: bool,
     /// `?` overlay
@@ -64,6 +66,7 @@ impl App {
             pending: VecDeque::new(),
             failed: HashMap::new(),
             filter_attention: false,
+            expanded: HashSet::new(),
             msg: "ready".into(),
             quit: false,
             show_help: false,
@@ -262,6 +265,12 @@ impl App {
             }
             End | Char('G') => {
                 self.sel = self.visible_rows().last().copied().unwrap_or(0);
+            }
+            Right | Char('l') => {
+                self.expanded.insert(self.sel);
+            }
+            Left | Char('h') => {
+                self.expanded.remove(&self.sel);
             }
             Enter => self.enter(),
             Char(' ') => self.pick_one(),
@@ -600,6 +609,7 @@ impl App {
             pending: VecDeque::new(),
             failed: HashMap::new(),
             filter_attention: false,
+            expanded: HashSet::new(),
             msg: "ready".into(),
             quit: false,
             show_help: false,
@@ -712,6 +722,40 @@ mod tests {
         app.on_key(key(KeyCode::Esc));
         app.on_key(key(KeyCode::Char('?')));
         assert_eq!(app.help_scroll, 0, "reopening starts at the top again");
+    }
+
+    #[test]
+    fn right_and_left_toggle_the_description_row() {
+        let mut app = App::with_apps(apps(3));
+        app.on_key(key(KeyCode::Right));
+        assert!(
+            app.expanded.contains(&0),
+            "Right expands the highlighted app"
+        );
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Char('l')));
+        assert!(app.expanded.contains(&1), "l expands too");
+        assert!(
+            app.expanded.contains(&0),
+            "expansions stay per app while moving"
+        );
+        app.on_key(key(KeyCode::Char('h')));
+        assert!(
+            !app.expanded.contains(&1),
+            "h collapses the highlighted row"
+        );
+        assert!(app.expanded.contains(&0), "other expansions are untouched");
+        app.on_key(key(KeyCode::Left));
+        assert!(
+            app.expanded.contains(&0),
+            "Left only collapses the highlighted app"
+        );
+        app.on_key(key(KeyCode::Home));
+        app.on_key(key(KeyCode::Left));
+        assert!(
+            app.expanded.is_empty(),
+            "Left collapses the app under the cursor"
+        );
     }
 
     #[test]

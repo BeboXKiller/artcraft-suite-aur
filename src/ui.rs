@@ -36,7 +36,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Constraint::Length(4),
         Constraint::Min(6),
         Constraint::Length(7),
-        Constraint::Length(2),
+        Constraint::Length(3),
     ])
     .areas(area);
 
@@ -121,44 +121,58 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
     };
 
     let vis = app.visible_rows();
-    let items: Vec<ListItem> = vis
-        .iter()
-        .map(|&idx| {
-            let a = &app.apps[idx];
-            let (glyph, phrase, tint) = row_state(app, a);
-            let selected = idx == app.sel;
-            let bar = s.on_bar();
-            let cell = |t: Tint| if selected { bar } else { s.fg(t) };
-            let (mark, mark_style) = if app.picks.contains(&idx) {
-                (
-                    "■",
-                    if selected {
-                        bar.bold()
-                    } else {
-                        s.fg(Tint::Accent).bold()
-                    },
-                )
-            } else {
-                ("□", cell(Tint::Faint))
-            };
-            let mut spans = vec![
-                Span::styled(format!(" {mark} "), mark_style),
-                Span::styled(format!(" {} ", pad(&glyph, 3)), cell(tint)),
-                Span::styled(
-                    pad(a.repo, repo_w),
-                    if selected { bar.bold() } else { s.bold() },
+    let mut items: Vec<ListItem> = Vec::with_capacity(vis.len() * 2);
+    let mut sel_pos = None;
+    for &idx in &vis {
+        let a = &app.apps[idx];
+        let (glyph, phrase, tint) = row_state(app, a);
+        let selected = idx == app.sel;
+        let bar = s.on_bar();
+        let cell = |t: Tint| if selected { bar } else { s.fg(t) };
+        let (mark, mark_style) = if app.picks.contains(&idx) {
+            (
+                "■",
+                if selected {
+                    bar.bold()
+                } else {
+                    s.fg(Tint::Accent).bold()
+                },
+            )
+        } else {
+            ("□", cell(Tint::Faint))
+        };
+        let mut spans = vec![
+            Span::styled(format!(" {mark} "), mark_style),
+            Span::styled(format!(" {} ", pad(&glyph, 3)), cell(tint)),
+            Span::styled(
+                pad(a.repo, repo_w),
+                if selected { bar.bold() } else { s.bold() },
+            ),
+        ];
+        if show_version {
+            spans.push(Span::styled(
+                pad(a.version.as_deref().unwrap_or("-"), version_w),
+                cell(Tint::Muted),
+            ));
+        }
+        spans.push(Span::styled(format!(" {phrase}"), cell(tint)));
+        if selected {
+            sel_pos = Some(items.len());
+        }
+        items.push(ListItem::new(Line::from(spans)));
+        if app.expanded.contains(&idx) {
+            items.push(ListItem::new(Line::from(Span::styled(
+                format!(
+                    "        {}",
+                    clip(
+                        crate::engine::description_of(a.repo),
+                        inner_w.saturating_sub(8)
+                    )
                 ),
-            ];
-            if show_version {
-                spans.push(Span::styled(
-                    pad(a.version.as_deref().unwrap_or("-"), version_w),
-                    cell(Tint::Muted),
-                ));
-            }
-            spans.push(Span::styled(format!(" {phrase}"), cell(tint)));
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
+                s.fg(Tint::Muted),
+            ))));
+        }
+    }
 
     let mut title = format!(" Apps ({})", vis.len());
     if !app.picks.is_empty() {
@@ -173,7 +187,7 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
         .highlight_style(s.hl())
         .highlight_symbol("▶ ");
     let mut state = ListState::default();
-    state.select(vis.iter().position(|&i| i == app.sel));
+    state.select(sel_pos);
     frame.render_stateful_widget(list, area, &mut state);
 }
 
@@ -363,8 +377,10 @@ fn key_bar(s: Sty) -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("[j/k]", c),
             Span::raw(" move  "),
-            Span::styled("[U]", c),
-            Span::raw(" update all  "),
+            Span::styled("[→]", c),
+            Span::raw(" details  "),
+            Span::styled("[←]", c),
+            Span::raw(" close  "),
             Span::styled("[f]", c),
             Span::raw(" fetch  "),
             Span::styled("[x]", c),
@@ -373,6 +389,14 @@ fn key_bar(s: Sty) -> Vec<Line<'static>> {
             Span::raw(" help  "),
             Span::styled("[q]", c),
             Span::raw(" quit"),
+        ]),
+        Line::from(vec![
+            Span::styled("[U]", c),
+            Span::raw(" update all  "),
+            Span::styled("[a]", c),
+            Span::raw(" install all  "),
+            Span::styled("[r]", c),
+            Span::raw(" rescan"),
         ]),
     ]
 }
@@ -387,6 +411,8 @@ fn draw_help(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
         Line::from("  j/k or ↑↓       move the highlight"),
         Line::from("  PgUp / PgDn     jump ten rows"),
         Line::from("  g / G, Home/End first / last app"),
+        Line::from("  → / l            open a description under the app"),
+        Line::from("  ← / h            close it again"),
         Line::from("  o               attention only (hide apps that are fine)"),
         Line::from(""),
         Line::from(Span::styled(
@@ -545,11 +571,14 @@ mod tests {
     #[test]
     fn key_bar_fits_80_columns() {
         let rows = render(&app(), 80, 24);
-        let row1 = &rows[rows.len() - 2];
-        let row2 = &rows[rows.len() - 1];
-        assert!(row2.contains("[q]"), "quit hint missing: {row2:?}");
-        assert!(row2.contains("[?]"), "help hint missing: {row2:?}");
+        let row1 = &rows[rows.len() - 3];
+        let row2 = &rows[rows.len() - 2];
+        let row3 = &rows[rows.len() - 1];
         assert!(row1.contains("[Space] pick"), "pick hint missing: {row1:?}");
+        assert!(
+            row1.contains("[Ctrl+Space] pick more"),
+            "multi-pick hint missing: {row1:?}"
+        );
         assert!(
             row1.contains("[o] attention"),
             "filter hint missing: {row1:?}"
@@ -557,6 +586,28 @@ mod tests {
         assert!(
             row1.trim_end().ends_with("attention"),
             "row 1 was clipped at 80 columns: {row1:?}"
+        );
+        assert!(
+            row2.contains("[→] details"),
+            "expand hint missing: {row2:?}"
+        );
+        assert!(
+            row2.contains("[←] close"),
+            "collapse hint missing: {row2:?}"
+        );
+        assert!(row2.contains("[q] quit"), "quit hint missing: {row2:?}");
+        assert!(row2.trim_end().ends_with("quit"), "row 2 clipped: {row2:?}");
+        assert!(
+            row3.contains("[U] update all"),
+            "batch hint missing: {row3:?}"
+        );
+        assert!(
+            row3.contains("[a] install all"),
+            "install hint missing: {row3:?}"
+        );
+        assert!(
+            row3.trim_end().ends_with("rescan"),
+            "row 3 was clipped at 80 columns: {row3:?}"
         );
     }
 
@@ -636,6 +687,33 @@ mod tests {
         assert!(
             !rows.iter().any(|r| r.contains("photocraft")),
             "filtered-out row still rendered: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn expanded_row_shows_an_indented_description() {
+        let mut a = app();
+        a.expanded.insert(0);
+        let rows = render(&a, 80, 24);
+        let desc = rows
+            .iter()
+            .find(|r| r.contains("image editor"))
+            .expect("description row");
+        assert!(
+            desc.trim_start_matches('│').starts_with("        "),
+            "description must be indented: {desc:?}"
+        );
+        let app_row = rows
+            .iter()
+            .find(|r| r.contains("photocraft"))
+            .expect("app row");
+        assert!(
+            app_row.contains('▶'),
+            "highlight must stay on the app row: {app_row:?}"
+        );
+        assert!(
+            !desc.contains('▶'),
+            "description row must not be selectable"
         );
     }
 

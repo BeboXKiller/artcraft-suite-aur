@@ -27,6 +27,26 @@ pub const SUITE: &[&str] = &[
     "wordcraft",
 ];
 
+/// One-line product descriptions, as published on getartcraft.com/apps.
+pub fn description_of(repo: &str) -> &'static str {
+    match repo {
+        "cadcraft" => "Fast, open-source computer-aided design and drafting, in pure Rust.",
+        "craft-launcher" => "The Craft App Launcher: installs every app and keeps them up to date.",
+        "deckcraft" => "Build and deliver dynamic slide presentations, in pure Rust.",
+        "designcraft" => "Open-source page layout and publishing, rebuilt in pure Rust.",
+        "effectcraft" => "Open-source motion graphics and visual effects, built in pure Rust.",
+        "filmcraft" => "Professional, open-source video editing, rebuilt from scratch in Rust.",
+        "gridcraft" => "Fast, open-source spreadsheets and data analysis, rebuilt in pure Rust.",
+        "lightcraft" => "An open-source photo library and raw developer that runs on your machine.",
+        "pdfcraft" => "The open-source PDF workbench: read, organize, combine, split and secure.",
+        "photocraft" => "The open-source image editor you already know how to use.",
+        "soundcraft" => "Professional audio recording, editing and mixing in pure Rust.",
+        "vectorcraft" => "Fast, open-source vector illustration, reimaged in pure Rust.",
+        "wordcraft" => "Fast, open-source word processing, rebuilt in pure Rust.",
+        _ => "A craft app from the ArtCraft suite.",
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     Install,

@@ -114,6 +114,14 @@ send(" ")
 pump(0.4, "pick_one")
 send("j\x00")  # Ctrl+Space: toggle a second row
 pump(0.4, "pick_two")
+send("\x1b[C")  # Right: expand the description under the highlighted app
+pump(0.4, "expanded")
+send("k")  # move up; the description stays glued to its app
+pump(0.4, "expanded_moved")
+send("j")  # back onto the expanded app
+pump(0.4, "expanded_return")
+send("\x1b[D")  # Left: collapse it again
+pump(0.4, "collapsed")
 send("?")
 pump(0.4, "help")
 send("jjjjjjjj")  # scroll the help overlay to its end
@@ -168,9 +176,12 @@ checks = [
     )),
     ("key bar row 1", "[Space] pick" in stages["startup"]
      and "[Ctrl+Space] pick more" in stages["startup"] and "[o] attention" in stages["startup"]),
-    ("key bar row 1 not clipped", stages["startup"].splitlines()[-2].rstrip().endswith("attention")),
-    ("key bar row 2", "[q] quit" in stages["startup"] and "[j/k] move" in stages["startup"]),
-    ("key bar row 2 not clipped", stages["startup"].splitlines()[-1].rstrip().endswith("quit")),
+    ("key bar row 1 not clipped", stages["startup"].splitlines()[-3].rstrip().endswith("attention")),
+    ("key bar row 2", "[q] quit" in stages["startup"] and "[j/k] move" in stages["startup"]
+     and "[→] details" in stages["startup"] and "[←] close" in stages["startup"]),
+    ("key bar row 2 not clipped", stages["startup"].splitlines()[-2].rstrip().endswith("quit")),
+    ("key bar row 3", "[U] update all" in stages["startup"] and "[a] install all" in stages["startup"]),
+    ("key bar row 3 not clipped", stages["startup"].splitlines()[-1].rstrip().endswith("rescan")),
     ("selection moved", "▶ " in stages["nav"] and stages["nav"].count("▶") == 1),
     ("Down arrow moves selection", marked_line(stages["arrow_down"]) != ""
      and marked_line(stages["arrow_down"]) != marked_line(stages["nav"])),
@@ -178,6 +189,10 @@ checks = [
     ("empty squares drawn", "□" in stages["startup"]),
     ("Space fills the square", "■" in stages["pick_one"] and "· 1 picked" in stages["pick_one"]),
     ("Ctrl+Space adds a pick", "· 2 picked" in stages["pick_two"]),
+    ("right arrow expands the description", "motion graphics" in stages["expanded"]),
+    ("description follows its app while moving", "motion graphics" in stages["expanded_moved"]
+     and "motion graphics" in stages["expanded_return"]),
+    ("left arrow collapses the description", "motion graphics" not in stages["collapsed"]),
     ("help overlay rendered", "Esc to close" in stages["help"]),
     ("help describes each hint", "pick the row; press again to unpick" in stages["help"]
      and "j/k or" in stages["help"]),
