@@ -180,7 +180,8 @@ checks = [
     ("key bar row 2", "[q] quit" in stages["startup"] and "[j/k] move" in stages["startup"]
      and "[→] details" in stages["startup"] and "[←] close" in stages["startup"]),
     ("key bar row 2 not clipped", stages["startup"].splitlines()[-2].rstrip().endswith("quit")),
-    ("key bar row 3", "[U] update all" in stages["startup"] and "[a] install all" in stages["startup"]),
+    ("key bar row 3", "[U] update all" in stages["startup"] and "[a] install all" in stages["startup"]
+     and "[d] uninstall" in stages["startup"]),
     ("key bar row 3 not clipped", stages["startup"].splitlines()[-1].rstrip().endswith("rescan")),
     ("selection moved", "▶ " in stages["nav"] and stages["nav"].count("▶") == 1),
     ("Down arrow moves selection", marked_line(stages["arrow_down"]) != ""

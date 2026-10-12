@@ -49,6 +49,8 @@ pub struct App {
     pub palette: Palette,
     /// second `q` required while tasks are running
     confirm_quit: bool,
+    /// pending `d` uninstall: target indices awaiting a `y` confirmation
+    pub confirm_uninstall: Option<Vec<usize>>,
     /// Tail of the selected repo's log, refreshed by [`Self::refresh_log`].
     pub log: Vec<String>,
     log_repo: &'static str,
@@ -73,6 +75,7 @@ impl App {
             help_scroll: 0,
             palette: Palette::detect(),
             confirm_quit: false,
+            confirm_uninstall: None,
             log: Vec::new(),
             log_repo: "",
             log_len: 0,
@@ -251,6 +254,13 @@ impl App {
             }
             return;
         }
+        // A pending uninstall wants a plain `y`; anything else changes its mind.
+        if self.confirm_uninstall.is_some() && key.code != Char('y') {
+            self.confirm_uninstall = None;
+            self.msg = "uninstall cancelled".into();
+            self.confirm_quit = false;
+            return;
+        }
         if !matches!(key.code, Char('q') | Esc) {
             self.confirm_quit = false;
         }
@@ -278,6 +288,12 @@ impl App {
             Char('i') => self.start_action(Action::Install),
             Char('f') => self.start_action(Action::Fetch),
             Char('x') | Delete => self.cancel_selected(),
+            Char('d') => self.uninstall_selected(),
+            Char('y') => {
+                if let Some(targets) = self.confirm_uninstall.take() {
+                    self.run_uninstall(targets);
+                }
+            }
             Char('U') => {
                 let repos: Vec<String> = self
                     .apps
@@ -491,6 +507,88 @@ impl App {
         };
     }
 
+    /// `d`: offer to uninstall the picked (or highlighted) rows — binary,
+    /// desktop entry, icons and the clone. `y` confirms; any other key cancels.
+    fn uninstall_selected(&mut self) {
+        if self.apps.is_empty() {
+            return;
+        }
+        let targets = self.targets();
+        let eligible: Vec<usize> = targets
+            .iter()
+            .copied()
+            .filter(|i| {
+                self.apps
+                    .get(*i)
+                    .is_some_and(|a| a.installed && !self.is_staged(a.repo))
+            })
+            .collect();
+        let skipped = targets.len() - eligible.len();
+        if eligible.is_empty() {
+            self.msg = format!("nothing to uninstall ({skipped} skipped)");
+            return;
+        }
+        let what = if eligible.len() == 1 {
+            format!("uninstall {}?", self.row_label(eligible[0]))
+        } else {
+            format!("uninstall {} apps?", eligible.len())
+        };
+        self.msg = format!("{what} y = binary + menu entry + icons + clone; Esc cancels");
+        self.confirm_uninstall = Some(eligible);
+    }
+
+    /// `y`: carry out the pending uninstall.
+    fn run_uninstall(&mut self, targets: Vec<usize>) {
+        let mut removed = 0usize;
+        let mut skipped = 0usize;
+        let mut last_msg = String::new();
+        let mut last_err = None;
+        for i in targets {
+            let Some(a) = self.apps.get(i) else {
+                continue;
+            };
+            let repo = a.repo.to_string();
+            if self.is_staged(&repo) || !a.installed {
+                skipped += 1;
+                continue;
+            }
+            match engine::uninstall(&repo) {
+                Ok(msg) => {
+                    removed += 1;
+                    last_msg = msg;
+                    self.failed.remove(&repo);
+                    self.rescan_at(i);
+                }
+                Err(e) => {
+                    skipped += 1;
+                    last_err = Some((repo, e));
+                }
+            }
+        }
+        self.msg = if removed == 1 && last_err.is_none() {
+            last_msg
+        } else if removed == 0 {
+            match last_err {
+                Some((repo, e)) => {
+                    self.failed.insert(repo.clone(), e.clone());
+                    format!("{repo} · {e}")
+                }
+                None => format!("nothing to uninstall ({skipped} skipped)"),
+            }
+        } else {
+            let mut parts = vec![format!("{removed} uninstalled")];
+            if skipped > 0 {
+                parts.push(format!("{skipped} skipped"));
+            }
+            if let Some((repo, e)) = last_err {
+                self.failed.insert(repo.clone(), e.clone());
+                parts.push(format!("{repo} · {e}"));
+            }
+            parts.join(" · ")
+        };
+        self.clamp_selection();
+    }
+
     fn enter(&mut self) {
         if self.apps.is_empty() {
             return;
@@ -616,6 +714,7 @@ impl App {
             help_scroll: 0,
             palette: Palette::of(crate::theme::Depth::TrueColor),
             confirm_quit: false,
+            confirm_uninstall: None,
             log: Vec::new(),
             log_repo: "",
             log_len: 0,
@@ -883,6 +982,50 @@ mod tests {
             "the installed row must not be queued"
         );
         assert_eq!(app.msg, "1 install queued · 1 already installed");
+    }
+
+    #[test]
+    fn d_asks_before_uninstall_and_any_other_key_cancels() {
+        let mut v = apps(3);
+        v[0].installed = true;
+        let mut app = App::with_apps(v);
+        app.sel = 0;
+        app.on_key(key(KeyCode::Char('d')));
+        assert!(app.confirm_uninstall.is_some(), "d must ask first");
+        assert!(app.msg.contains('y'), "prompt must say y: {}", app.msg);
+        app.on_key(key(KeyCode::Char('j')));
+        assert!(app.confirm_uninstall.is_none(), "another key must cancel");
+        assert_eq!(app.msg, "uninstall cancelled");
+        // asking again and confirming: no clone on disk, so the engine errors
+        // safely without touching anything real
+        app.on_key(key(KeyCode::Char('d')));
+        app.on_key(key(KeyCode::Char('y')));
+        assert!(
+            app.confirm_uninstall.is_none(),
+            "y must consume the confirm"
+        );
+        assert!(
+            app.msg.contains("no clone"),
+            "engine error must surface: {}",
+            app.msg
+        );
+        assert!(app.failed.contains_key("a"), "failed row must be marked");
+    }
+
+    #[test]
+    fn d_skips_busy_and_not_installed_rows() {
+        let mut v = apps(3);
+        v[0].installed = true;
+        let mut app = App::with_apps(v);
+        app.busy.insert("a".into(), "updating".into());
+        app.sel = 0;
+        app.on_key(key(KeyCode::Char('d')));
+        assert!(
+            app.confirm_uninstall.is_none(),
+            "nothing eligible must not ask"
+        );
+        assert_eq!(app.msg, "nothing to uninstall (1 skipped)");
+        assert_eq!(app.busy["a"], "updating", "busy row must stay untouched");
     }
 
     #[test]

@@ -410,6 +410,36 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Best-effort refresh of the desktop entry and icon caches.
+fn refresh_desktop_caches() {
+    let _ = Command::new("update-desktop-database")
+        .arg(desk_dir())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = Command::new("gtk-update-icon-cache")
+        .args(["-f", "-t"])
+        .arg(icon_dir())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Remove every file under `from`'s tree at the same relative path under `to`,
+/// counting successful deletions (mirrors `copy_tree`).
+fn remove_tree_files(from: &Path, to: &Path, removed: &mut usize) {
+    if let Ok(rd) = std::fs::read_dir(from) {
+        for e in rd.flatten() {
+            let t = to.join(e.file_name());
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                remove_tree_files(&e.path(), &t, removed);
+            } else if std::fs::remove_file(&t).is_ok() {
+                *removed += 1;
+            }
+        }
+    }
+}
+
 /// Register the app with the desktop: its `.desktop` entry and hicolor icons
 /// into the user's applications/icons directories, then refresh both caches.
 /// Returns whether an entry was actually copied.
@@ -433,18 +463,48 @@ fn install_menu_entry(dir: &Path) -> bool {
     if icons.is_dir() {
         let _ = copy_tree(&icons, &icon_dir());
     }
-    let _ = Command::new("update-desktop-database")
-        .arg(desk_dir())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    let _ = Command::new("gtk-update-icon-cache")
-        .args(["-f", "-t"])
-        .arg(icon_dir())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    refresh_desktop_caches();
     registered
+}
+
+/// Remove what an install puts on the system: the binary in `~/.local/bin`,
+/// the desktop entry and the hicolor icons — and the clone in `~/<repo>`.
+/// The clone goes last, so a failed removal of the rest never costs the source.
+pub fn uninstall(repo: &str) -> Result<String, String> {
+    let dir = home().join(repo);
+    let pkg = pkg_of(&dir).ok_or("no clone - nothing to uninstall")?;
+    let bin = bin_dir().join(&pkg);
+    let had_bin = bin.is_file();
+    if had_bin {
+        std::fs::remove_file(&bin).map_err(|e| format!("remove {bin:?}: {e}"))?;
+    }
+    let mut desk_removed = false;
+    let desk = dir.join("packaging/linux");
+    if let Ok(rd) = std::fs::read_dir(&desk) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "desktop") {
+                if let Some(name) = p.file_name() {
+                    desk_removed |= std::fs::remove_file(desk_dir().join(name)).is_ok();
+                }
+                break;
+            }
+        }
+    }
+    let mut icons_removed = 0usize;
+    remove_tree_files(
+        &dir.join("assets/app-icon/hicolor"),
+        &icon_dir(),
+        &mut icons_removed,
+    );
+    refresh_desktop_caches();
+    if !had_bin && !desk_removed && icons_removed == 0 {
+        return Err("nothing installed to remove".into());
+    }
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("remove clone {dir:?}: {e}"))?;
+    }
+    Ok(format!("removed {pkg} + clone"))
 }
 
 fn build_install(dir: &Path, repo: &str) -> Result<String, String> {

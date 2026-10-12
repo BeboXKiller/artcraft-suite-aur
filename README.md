@@ -64,7 +64,7 @@ full-screen UI: it prints the `--status` format and a hint on stderr, then exits
 └────────────────────────────────────────────────────────────────────────────┘
  [Space] pick  [Ctrl+Space] pick more  [Enter] open  [u] update  [o] attention
  [j/k] move  [→] details  [←] close  [f] fetch  [x] cancel  [?] help  [q] quit
- [U] update all  [a] install all  [r] rescan
+ [U] update all  [a] install all  [d] uninstall  [r] rescan
 ```
 
 Every row states its situation twice — a glyph and the same fact in words
@@ -88,7 +88,9 @@ lands in `~/.local/bin`, the repo's `packaging/linux/*.desktop` entry and its
 hicolor icons are copied into `~/.local/share/applications` and
 `~/.local/share/icons/hicolor`, and the desktop/icon caches are refreshed — so
 the app appears in your app menu right away. The success message says as much
-(`· added to app menu`).
+(`· added to app menu`). `d` undoes exactly this — and goes one step further:
+it removes the binary, the desktop entry, the icons *and* the clone in
+`~/<repo>`, after a popup asks for a `y` confirmation first.
 
 ## Keyboard shortcuts
 
@@ -104,6 +106,7 @@ the app appears in your app menu right away. The success message says as much
 | `Enter` | launch the selected app, or install it if missing; on a multi-pick, install every missing one |
 | `u` / `i` / `f` | update / install / fetch — the picked rows, or the highlighted row when nothing is picked |
 | `U` / `a` | update everything cloned / install everything missing |
+| `d` | uninstall the picked/highlighted apps — binary, desktop entry, icons and the clone; asks for `y`, any other key cancels |
 | `o` | toggle **attention only** — hide the apps that are up to date |
 | `x` / `Delete` | cancel the running task, or dequeue a queued one — again over the picked set |
 | `r` | rescan all apps from disk (on a background thread) |
@@ -113,9 +116,9 @@ the app appears in your app menu right away. The success message says as much
 
 `Ctrl` chords never act as their bare letters: `Ctrl+A` will not start
 "install all" by accident — only `Ctrl+Space` (pick) and `Ctrl+C`/`Ctrl+D`
-(quit) do anything. Picking is a temporary selection: `u`, `i`, `f`, `x` and
-`Enter` look at the picked rows first and fall back to the highlighted row when
-nothing is picked, so the picks always win. `o` narrows the list to the
+(quit) do anything. Picking is a temporary selection: `u`, `i`, `f`, `d`, `x`
+and `Enter` look at the picked rows first and fall back to the highlighted row
+when nothing is picked, so the picks always win. `o` narrows the list to the
 apps that need attention (missing, behind upstream, or failed) — the highlight
 follows the filter, and the header badge says when it is on. At most 2 tasks
 run at once; the rest queue up (shown as `◌` and in the status row).
@@ -236,7 +239,9 @@ Source layout — concerns are kept separate on purpose:
   dequeueing, `Space`/`Ctrl+Space` picking, batch actions over the picked set
   (never the cursor row), `Enter` installing only the missing picks, the `o`
   attention filter (including clamping the highlight onto a visible row), failed
-  tasks counting as attention, and status tone following the message prefix.
+  tasks counting as attention, the `d` → `y` uninstall confirmation (any other
+  key cancels it; busy and not-installed rows are skipped), and status tone
+  following the message prefix.
 - **Engine** (`src/engine.rs`): children are wired to the log file (not the tty),
   `log_tail` survives invalid UTF-8, the version probe respects its timeout.
 - **End-to-end** (`scripts/tui_smoke.py`): boots the real binary in a sized pty,

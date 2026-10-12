@@ -75,6 +75,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.show_help {
         draw_help(frame, area, s, app.help_scroll);
     }
+    if let Some(targets) = &app.confirm_uninstall {
+        draw_confirm_uninstall(frame, area, s, app, targets);
+    }
 }
 
 /// Right-aligned header counters: how much is current, behind, or missing.
@@ -395,6 +398,8 @@ fn key_bar(s: Sty) -> Vec<Line<'static>> {
             Span::raw(" update all  "),
             Span::styled("[a]", c),
             Span::raw(" install all  "),
+            Span::styled("[d]", c),
+            Span::raw(" uninstall  "),
             Span::styled("[r]", c),
             Span::raw(" rescan"),
         ]),
@@ -416,7 +421,7 @@ fn draw_help(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
         Line::from("  o               attention only (hide apps that are fine)"),
         Line::from(""),
         Line::from(Span::styled(
-            "Picking — what u / i / f / x / Enter act on",
+            "Picking — what u / i / f / d / x / Enter act on",
             h,
         )),
         Line::from("  Space           pick the row; press again to unpick"),
@@ -428,6 +433,8 @@ fn draw_help(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
         Line::from("                   many picks: install every missing one"),
         Line::from("  u / i / f       update / install / fetch the picks"),
         Line::from("  U / a           update everything / install everything"),
+        Line::from("  d               uninstall: binary, menu, icons, clone"),
+        Line::from("                   y confirms, any other key cancels"),
         Line::from("  x or Delete     cancel a task, or unqueue a queued one"),
         Line::from("  r               rescan every app from disk"),
         Line::from(""),
@@ -459,6 +466,54 @@ fn draw_help(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
         Paragraph::new(visible)
             .block(Block::bordered().title(" Help — j/k scroll · ? or Esc to close "))
             .wrap(Wrap { trim: false }),
+        rect,
+    );
+}
+
+/// Centered confirmation for `d`: deleting the clone deserves more than a
+/// status-line nudge — a small card, the names, what goes, how to say yes.
+fn draw_confirm_uninstall(frame: &mut Frame, area: Rect, s: Sty, app: &App, targets: &[usize]) {
+    let mut lines: Vec<Line> = Vec::new();
+    let names: Vec<&str> = targets
+        .iter()
+        .filter_map(|i| app.apps.get(*i).map(|a| a.repo))
+        .collect();
+    for n in names.iter().take(5) {
+        lines.push(Line::from(Span::styled(
+            format!("  {n}"),
+            s.fg(Tint::Accent).bold(),
+        )));
+    }
+    if names.len() > 5 {
+        lines.push(Line::from(Span::styled(
+            format!("  +{} more", names.len() - 5),
+            s.fg(Tint::Faint),
+        )));
+    }
+    lines.push(Line::from(""));
+    for l in [
+        "  This removes the binary, the",
+        "  desktop entry, the icons and",
+        "  the clone.",
+    ] {
+        lines.push(Line::from(Span::styled(l, s.fg(Tint::Warn))));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  y confirms · any other key cancels",
+        s.fg(Tint::Faint),
+    )));
+    let w = area.width.min(40);
+    let box_h = (lines.len() as u16 + 2).min(area.height);
+    let rect = Rect::new(
+        area.x + (area.width.saturating_sub(w)) / 2,
+        area.y + (area.height.saturating_sub(box_h)) / 2,
+        w,
+        box_h,
+    );
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" Confirm uninstall ")),
         rect,
     );
 }
@@ -604,6 +659,10 @@ mod tests {
         assert!(
             row3.contains("[a] install all"),
             "install hint missing: {row3:?}"
+        );
+        assert!(
+            row3.contains("[d] uninstall"),
+            "uninstall hint missing: {row3:?}"
         );
         assert!(
             row3.trim_end().ends_with("rescan"),
@@ -801,6 +860,10 @@ mod tests {
             joined.contains("pick the row; press again to unpick"),
             "every hint needs a description: {joined:?}"
         );
+        assert!(
+            joined.contains("uninstall: binary, menu, icons, clone"),
+            "uninstall hint missing from help: {joined:?}"
+        );
     }
 
     #[test]
@@ -813,6 +876,31 @@ mod tests {
         assert!(
             !joined.contains("Navigation"),
             "scroll offset ignored: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn confirm_uninstall_is_a_centered_card_not_a_full_screen() {
+        let mut a = app();
+        a.confirm_uninstall = Some(vec![0]);
+        let joined = render(&a, 80, 24).join("\n");
+        assert!(joined.contains("Confirm uninstall"), "{joined:?}");
+        assert!(joined.contains("photocraft"), "{joined:?}");
+        assert!(
+            joined.contains("y confirms · any other key cancels"),
+            "{joined:?}"
+        );
+        assert!(joined.contains("the clone."), "{joined:?}");
+        // the card is small: the key bar stays readable around it
+        assert!(
+            joined.contains("[q] quit"),
+            "modal ate the frame: {joined:?}"
+        );
+        // and it never shows without a pending confirm
+        let b = app();
+        assert!(
+            !render(&b, 80, 24).join("\n").contains("Confirm uninstall"),
+            "modal leaked into a normal frame"
         );
     }
 
