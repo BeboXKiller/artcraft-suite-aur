@@ -1,106 +1,697 @@
 //! Application state: selection, background tasks, key handling.
 
-use std::collections::HashMap;
-use std::sync::mpsc::{Sender, Receiver};
+use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(test)]
+use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, Sender};
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::engine::{self, Action, AppInfo, Ev};
 
+const MAX_PARALLEL: usize = 2;
+/// Rows a PageUp/PageDown jumps; close to a typical list viewport height.
+const PAGE: usize = 10;
+/// Bytes of build log cached for the tail pane.
+const LOG_BYTES: u64 = 4096;
+
 pub struct App {
     pub apps: Vec<AppInfo>,
+    /// highlighted row — the fallback target when nothing is picked
     pub sel: usize,
+    /// explicitly picked rows (`Space` / `Ctrl+Space`); empty means "use `sel`"
+    pub picks: HashSet<usize>,
     pub busy: HashMap<String, String>,
+    pub pending: VecDeque<(String, Action)>,
     pub msg: String,
     pub quit: bool,
+    /// `?` overlay
+    pub show_help: bool,
+    /// `NO_COLOR` set: render without ANSI colors (bold/reverse still used)
+    pub no_color: bool,
+    /// second `q` required while tasks are running
+    confirm_quit: bool,
+    /// Tail of the selected repo's log, refreshed by [`Self::refresh_log`].
+    pub log: Vec<String>,
+    log_repo: &'static str,
+    log_len: u64,
     tx: Sender<Ev>,
 }
 
 impl App {
     pub fn new(tx: Sender<Ev>) -> Self {
-        Self { apps: engine::scan(), sel: 0, busy: HashMap::new(), msg: "ready".into(), quit: false, tx }
+        let mut app = Self {
+            apps: engine::scan(),
+            sel: 0,
+            picks: HashSet::new(),
+            busy: HashMap::new(),
+            pending: VecDeque::new(),
+            msg: "ready".into(),
+            quit: false,
+            show_help: false,
+            no_color: std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
+            confirm_quit: false,
+            log: Vec::new(),
+            log_repo: "",
+            log_len: 0,
+            tx,
+        };
+        app.refresh_log();
+        app
     }
 
     pub fn drain(&mut self, rx: &Receiver<Ev>) {
         while let Ok(ev) = rx.try_recv() {
-            let Ev::Done { repo, action, result } = ev;
-            self.busy.remove(&repo);
-            self.msg = match result {
-                Ok(m) => m,
-                Err(e) => format!("{repo} · {}: {e}", action.label()),
-            };
-            // statuses may have changed (installed, version)
-            engine::rescan(&mut self.apps);
+            match ev {
+                Ev::Done {
+                    repo,
+                    action,
+                    result,
+                } => {
+                    self.busy.remove(&repo);
+                    self.msg = match result {
+                        Ok(m) => m,
+                        Err(e) => format!("{repo} · {}: {e}", action.label()),
+                    };
+                    if let Some(idx) = self.apps.iter().position(|a| a.repo == repo) {
+                        self.rescan_at(idx);
+                    }
+                    self.pump();
+                }
+                Ev::Scanned { index, info } => {
+                    // the suite order is fixed, but guard against a stale index anyway
+                    if let Some(slot) = self.apps.get_mut(index)
+                        && slot.repo == info.repo
+                    {
+                        *slot = info;
+                    }
+                }
+                Ev::Refreshed => self.msg = "refreshed".into(),
+            }
         }
     }
 
-    pub fn on_key(&mut self, code: crossterm::event::KeyCode) {
-        use crossterm::event::KeyCode::*;
-        match code {
-            Char('q') | Esc => self.quit = true,
-            Up | Char('k') => {
-                self.sel = self.sel.saturating_sub(1);
+    /// Cache the log tail for the selected repo.
+    ///
+    /// Called once per loop: a `stat` per tick, re-read only when the file or the
+    /// selection changed, so rendering stays a pure function of state.
+    pub fn refresh_log(&mut self) {
+        let repo = self.apps.get(self.sel).map_or("", |a| a.repo);
+        let len = std::fs::metadata(engine::log_file(repo))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if repo == self.log_repo && len == self.log_len {
+            return;
+        }
+        self.log_repo = repo;
+        self.log_len = len;
+        self.log = engine::log_tail(repo, LOG_BYTES)
+            .map(|t| t.lines().map(str::to_string).collect())
+            .unwrap_or_default();
+    }
+
+    pub fn status_line(&self) -> (String, bool) {
+        let mut parts = Vec::new();
+        if let Some(s) = engine::busy_summary(&self.busy) {
+            parts.push(s);
+        }
+        if !self.pending.is_empty() {
+            parts.push(format!("{} queued", self.pending.len()));
+        }
+        if parts.is_empty() {
+            (self.msg.clone(), false)
+        } else {
+            (parts.join(" · "), true)
+        }
+    }
+
+    fn try_start(&mut self, repo: String, action: Action) {
+        if self.busy.contains_key(&repo) || self.pending.iter().any(|(r, _)| *r == repo) {
+            return;
+        }
+        if self.busy.len() >= MAX_PARALLEL {
+            self.pending.push_back((repo, action));
+            return;
+        }
+        self.busy.insert(repo.clone(), action.label().into());
+        engine::spawn(repo, action, self.tx.clone());
+    }
+
+    fn pump(&mut self) {
+        while let Some((repo, action)) = self.pending.pop_front() {
+            if self.busy.contains_key(&repo) || self.busy.len() >= MAX_PARALLEL {
+                self.pending.push_front((repo, action));
+                break;
             }
+            self.busy.insert(repo.clone(), action.label().into());
+            engine::spawn(repo, action, self.tx.clone());
+        }
+    }
+
+    /// Re-read one entry from disk on a worker thread.
+    fn rescan_at(&self, index: usize) {
+        let Some(cur) = self.apps.get(index) else {
+            return;
+        };
+        let mut info = cur.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            engine::rescan_one(&mut info);
+            let _ = tx.send(Ev::Scanned { index, info });
+        });
+    }
+
+    /// Re-read every entry from disk on one worker thread, reporting progressively.
+    fn rescan_all(&self) {
+        let mut infos = self.apps.clone();
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            for (index, info) in infos.iter_mut().enumerate() {
+                engine::rescan_one(info);
+                let _ = tx.send(Ev::Scanned {
+                    index,
+                    info: info.clone(),
+                });
+            }
+            let _ = tx.send(Ev::Refreshed);
+        });
+    }
+
+    pub fn on_key(&mut self, key: KeyEvent) {
+        use KeyCode::*;
+        // Ctrl chords are never aliases for their bare letters: Ctrl+C quits,
+        // the rest are left to the terminal.
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                Char('c') | Char('d') => self.quit = true,
+                // terminals send Ctrl+Space as NUL, decoded as Char(' ') + CONTROL
+                Char(' ') => self.pick_toggle(),
+                _ => {}
+            }
+            self.confirm_quit = false;
+            return;
+        }
+        if key.code == Char('?') {
+            self.show_help = !self.show_help;
+            self.confirm_quit = false;
+            return;
+        }
+        if self.show_help {
+            if matches!(key.code, Esc | Char('q') | Enter) {
+                self.show_help = false;
+            }
+            return;
+        }
+        if !matches!(key.code, Char('q') | Esc) {
+            self.confirm_quit = false;
+        }
+        match key.code {
+            Char('q') | Esc => self.request_quit(),
+            Up | Char('k') => self.sel = self.sel.saturating_sub(1),
             Down | Char('j') => {
                 if self.sel + 1 < self.apps.len() {
                     self.sel += 1;
                 }
             }
-            Home => self.sel = 0,
-            End => self.sel = self.apps.len().saturating_sub(1),
+            PageUp => self.sel = self.sel.saturating_sub(PAGE),
+            PageDown => self.sel = (self.sel + PAGE).min(self.apps.len().saturating_sub(1)),
+            Home | Char('g') => self.sel = 0,
+            End | Char('G') => self.sel = self.apps.len().saturating_sub(1),
             Enter => self.enter(),
-            Char('u') => self.start_selected(Action::Update),
-            Char('i') => self.start_selected(Action::Install),
-            Char('f') => self.start_selected(Action::Fetch),
+            Char(' ') => self.pick_one(),
+            Char('u') => self.start_action(Action::Update),
+            Char('i') => self.start_action(Action::Install),
+            Char('f') => self.start_action(Action::Fetch),
+            Char('x') | Delete => self.cancel_selected(),
             Char('U') => {
-                for i in 0..self.apps.len() {
-                    let repo = self.apps[i].repo.to_string();
-                    if self.apps[i].cloned && !self.busy.contains_key(&repo) {
-                        self.busy.insert(repo.clone(), Action::Update.label().into());
-                        engine::spawn(repo, Action::Update, self.tx.clone());
-                    }
+                let repos: Vec<String> = self
+                    .apps
+                    .iter()
+                    .filter(|a| a.cloned)
+                    .map(|a| a.repo.to_string())
+                    .collect();
+                let before = self.busy.len() + self.pending.len();
+                for repo in repos {
+                    self.try_start(repo, Action::Update);
                 }
+                self.msg = if self.busy.len() + self.pending.len() > before {
+                    "update queued".into()
+                } else {
+                    "nothing to update".into()
+                };
             }
             Char('a') => {
-                for i in 0..self.apps.len() {
-                    let repo = self.apps[i].repo.to_string();
-                    if !self.apps[i].installed && !self.busy.contains_key(&repo) {
-                        self.busy.insert(repo.clone(), Action::Install.label().into());
-                        engine::spawn(repo, Action::Install, self.tx.clone());
-                    }
+                let repos: Vec<String> = self
+                    .apps
+                    .iter()
+                    .filter(|a| !a.installed)
+                    .map(|a| a.repo.to_string())
+                    .collect();
+                let before = self.busy.len() + self.pending.len();
+                for repo in repos {
+                    self.try_start(repo, Action::Install);
                 }
+                self.msg = if self.busy.len() + self.pending.len() > before {
+                    "install queued".into()
+                } else {
+                    "nothing to install".into()
+                };
             }
             Char('r') => {
-                engine::rescan(&mut self.apps);
-                self.msg = "refreshed".into();
+                self.rescan_all();
+                self.msg = "refreshing…".into();
             }
             _ => {}
         }
     }
 
-    fn enter(&mut self) {
-        let Some(a) = self.apps.get(self.sel) else { return };
-        if self.busy.contains_key(a.repo) {
-            self.msg = format!("{} already running for {}", self.busy[a.repo], a.repo);
+    fn request_quit(&mut self) {
+        let running = self.busy.len() + self.pending.len();
+        if running > 0 && !self.confirm_quit {
+            self.confirm_quit = true;
+            self.msg = format!(
+                "{running} task(s) still running — press q again to quit (they keep running)"
+            );
+        } else {
+            self.quit = true;
+        }
+    }
+
+    /// `Space`: pick just this row; pressing it again on the only pick clears it.
+    fn pick_one(&mut self) {
+        if self.picks.len() == 1 && self.picks.contains(&self.sel) {
+            self.picks.clear();
+            self.msg = "picks cleared".into();
+        } else {
+            self.picks.clear();
+            self.picks.insert(self.sel);
+            self.msg = format!("picked {}", self.row_label(self.sel));
+        }
+    }
+
+    /// `Ctrl+Space`: add or remove this row from the picked set.
+    fn pick_toggle(&mut self) {
+        let label = self.row_label(self.sel);
+        if self.picks.remove(&self.sel) {
+            self.msg = format!("unpicked {label} ({} left)", self.picks.len());
+        } else {
+            self.picks.insert(self.sel);
+            self.msg = format!("picked {label} ({} total)", self.picks.len());
+        }
+    }
+
+    fn row_label(&self, idx: usize) -> String {
+        self.apps
+            .get(idx)
+            .map(|a| a.repo.to_string())
+            .unwrap_or_else(|| "?".into())
+    }
+
+    /// Rows an operation applies to: the picked set, else the highlighted row.
+    fn targets(&self) -> Vec<usize> {
+        if self.picks.is_empty() {
+            vec![self.sel]
+        } else {
+            let mut v: Vec<usize> = self.picks.iter().copied().collect();
+            v.sort_unstable();
+            v
+        }
+    }
+
+    fn is_staged(&self, repo: &str) -> bool {
+        self.busy.contains_key(repo) || self.pending.iter().any(|(r, _)| r == repo)
+    }
+
+    fn cancel_selected(&mut self) {
+        if self.apps.is_empty() {
             return;
         }
-        if a.installed {
-            let pkg = a.pkg.clone().unwrap_or_else(|| a.repo.to_string());
+        let targets = self.targets();
+        let mut cancelling = 0usize;
+        let mut dequeued = 0usize;
+        let mut finished = 0usize;
+        let mut idle = 0usize;
+        for i in &targets {
+            let Some(repo) = self.apps.get(*i).map(|a| a.repo) else {
+                continue;
+            };
+            if self.busy.contains_key(repo) {
+                if engine::cancel(repo) {
+                    cancelling += 1;
+                } else {
+                    finished += 1;
+                }
+            } else if let Some(pos) = self.pending.iter().position(|(r, _)| r == repo) {
+                self.pending.remove(pos);
+                dequeued += 1;
+            } else {
+                idle += 1;
+            }
+        }
+        self.msg = if targets.len() == 1 {
+            let repo = self.row_label(targets[0]);
+            if cancelling == 1 {
+                format!("cancelling {repo}")
+            } else if dequeued == 1 {
+                format!("{repo} dequeued")
+            } else if finished == 1 {
+                format!("{repo} already finished")
+            } else {
+                format!("{repo} is idle — nothing to cancel")
+            }
+        } else if cancelling + dequeued + finished == 0 {
+            format!("nothing to cancel ({idle} idle)")
+        } else {
+            let mut parts = Vec::new();
+            if cancelling > 0 {
+                parts.push(format!("{cancelling} cancelling"));
+            }
+            if dequeued > 0 {
+                parts.push(format!("{dequeued} dequeued"));
+            }
+            if finished > 0 {
+                parts.push(format!("{finished} already finished"));
+            }
+            parts.join(" · ")
+        };
+    }
+
+    fn enter(&mut self) {
+        if self.apps.is_empty() {
+            return;
+        }
+        let targets = self.targets();
+        if targets.len() > 1 {
+            self.enter_many(&targets);
+            return;
+        }
+        let Some(a) = self.apps.get(targets[0]) else {
+            return;
+        };
+        let repo = a.repo;
+        let installed = a.installed;
+        let pkg = a.pkg.clone();
+        if self.busy.contains_key(repo) {
+            self.msg = format!("{} already running for {repo}", self.busy[repo]);
+            return;
+        }
+        if self.pending.iter().any(|(r, _)| r == repo) {
+            self.msg = format!("{repo} is queued — wait, or press x to dequeue");
+            return;
+        }
+        if installed {
+            let pkg = pkg.unwrap_or_else(|| repo.to_string());
             self.msg = match engine::launch(&pkg) {
                 Ok(()) => format!("launched {pkg}"),
                 Err(e) => e,
             };
         } else {
-            self.start_selected(Action::Install);
+            self.start_action(Action::Install);
         }
     }
 
-    fn start_selected(&mut self, action: Action) {
-        let Some(a) = self.apps.get(self.sel) else { return };
-        if self.busy.contains_key(a.repo) {
-            self.msg = format!("{} already running for {}", self.busy[a.repo], a.repo);
+    /// Enter on a multi-pick: install what's missing, skip what's installed.
+    /// Launching a pile of GUI apps would surprise the user and stall the UI.
+    fn enter_many(&mut self, targets: &[usize]) {
+        let before = self.busy.len() + self.pending.len();
+        let mut installed = 0usize;
+        for i in targets {
+            let Some((is_installed, repo)) =
+                self.apps.get(*i).map(|a| (a.installed, a.repo.to_string()))
+            else {
+                continue;
+            };
+            if is_installed {
+                installed += 1;
+                continue;
+            }
+            if self.is_staged(&repo) {
+                continue;
+            }
+            self.try_start(repo, Action::Install);
+        }
+        let queued = (self.busy.len() + self.pending.len()).saturating_sub(before);
+        self.msg = match (queued, installed) {
+            (0, n) if n == targets.len() => format!("all {n} already installed"),
+            (0, _) => "already queued or installed".into(),
+            (q, n) if n > 0 => format!("{q} install queued · {n} already installed"),
+            (q, _) => format!("{q} install queued"),
+        };
+    }
+
+    /// Run `action` against the picked set, or the highlighted row when nothing
+    /// is picked. Busy/queued rows are left alone by `try_start`.
+    fn start_action(&mut self, action: Action) {
+        if self.apps.is_empty() {
+            self.msg = "no apps".into();
             return;
         }
-        let repo = a.repo.to_string();
-        self.busy.insert(repo.clone(), action.label().into());
-        engine::spawn(repo, action, self.tx.clone());
+        let targets = self.targets();
+        let before = self.busy.len() + self.pending.len();
+        // a single target that was already running before we touched it
+        let was_running = (targets.len() == 1)
+            .then(|| self.row_label(targets[0]))
+            .is_some_and(|repo| self.busy.contains_key(&repo));
+        for i in &targets {
+            let Some(repo) = self.apps.get(*i).map(|a| a.repo.to_string()) else {
+                continue;
+            };
+            self.try_start(repo, action);
+        }
+        let added = (self.busy.len() + self.pending.len()).saturating_sub(before);
+        self.msg = if targets.len() == 1 {
+            let repo = self.row_label(targets[0]);
+            if self.busy.contains_key(&repo) && !was_running {
+                format!("{} {repo}", action.label())
+            } else if self.busy.contains_key(&repo) {
+                format!("{} already running for {repo}", self.busy[&repo])
+            } else {
+                format!("{repo} queued")
+            }
+        } else {
+            match (targets.len(), added) {
+                (n, 0) => format!("all {n} already running or queued"),
+                (n, a) if a == n => format!("{a} {} queued", action.verb()),
+                (n, a) => format!("{a}/{n} {} queued", action.verb()),
+            }
+        };
+    }
+}
+
+#[cfg(test)]
+impl App {
+    /// Build an app over a synthetic suite, without touching the real filesystem.
+    ///
+    /// The sender is disconnected, so state-only tests can run freely — but any
+    /// key that starts a task would still spawn real work, so don't press those.
+    pub fn with_apps(apps: Vec<AppInfo>) -> Self {
+        let (tx, _rx) = mpsc::channel();
+        Self {
+            apps,
+            sel: 0,
+            picks: HashSet::new(),
+            busy: HashMap::new(),
+            pending: VecDeque::new(),
+            msg: "ready".into(),
+            quit: false,
+            show_help: false,
+            no_color: false,
+            confirm_quit: false,
+            log: Vec::new(),
+            log_repo: "",
+            log_len: 0,
+            tx,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn apps(n: usize) -> Vec<AppInfo> {
+        (0..n)
+            .map(|i| AppInfo {
+                repo: TEST_REPOS[i],
+                dir: std::path::PathBuf::from("/nonexistent"),
+                pkg: None,
+                cloned: false,
+                installed: false,
+                version: None,
+                behind: None,
+            })
+            .collect()
+    }
+
+    static TEST_REPOS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn selection_is_clamped() {
+        let mut app = App::with_apps(apps(3));
+        app.on_key(key(KeyCode::Up));
+        assert_eq!(app.sel, 0);
+        app.on_key(key(KeyCode::End));
+        assert_eq!(app.sel, 2);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.sel, 2);
+        app.on_key(key(KeyCode::Home));
+        assert_eq!(app.sel, 0);
+        app.on_key(key(KeyCode::PageDown));
+        assert_eq!(app.sel, 2, "PAGE jump clamps to the last row");
+    }
+
+    #[test]
+    fn ctrl_c_quits_and_ctrl_letters_do_not_trigger_actions() {
+        let mut app = App::with_apps(apps(3));
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(!app.quit, "Ctrl+A must not install everything");
+        assert!(app.pending.is_empty() && app.busy.is_empty());
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.quit, "Ctrl+C must quit");
+    }
+
+    #[test]
+    fn help_overlay_swallows_keys_until_closed() {
+        let mut app = App::with_apps(apps(3));
+        app.on_key(key(KeyCode::Char('?')));
+        assert!(app.show_help);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.sel, 0, "navigation must not pass through the overlay");
+        app.on_key(key(KeyCode::Esc));
+        assert!(!app.show_help);
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.sel, 1);
+    }
+
+    #[test]
+    fn quit_asks_for_confirmation_while_tasks_run() {
+        let mut app = App::with_apps(apps(3));
+        app.busy.insert("a".into(), "installing".into());
+        app.on_key(key(KeyCode::Char('q')));
+        assert!(!app.quit, "first q must only warn");
+        assert!(app.msg.contains("still running"));
+        app.on_key(key(KeyCode::Char('q')));
+        assert!(app.quit, "second q must quit");
+    }
+
+    #[test]
+    fn queued_task_can_be_dequeued() {
+        let mut app = App::with_apps(apps(3));
+        app.pending.push_back(("a".into(), Action::Install));
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.pending.is_empty());
+        assert!(app.msg.contains("dequeued"));
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    /// Fill both runner slots so no key press can spawn real work.
+    fn saturate(app: &mut App) {
+        app.busy.insert("z1".into(), "installing".into());
+        app.busy.insert("z2".into(), "installing".into());
+        assert_eq!(app.busy.len(), MAX_PARALLEL);
+    }
+
+    #[test]
+    fn space_picks_one_row_and_ctrl_space_toggles() {
+        let mut app = App::with_apps(apps(3));
+        app.on_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.picks, [0usize].into_iter().collect());
+        assert!(app.msg.contains("picked a"));
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(ctrl(KeyCode::Char(' ')));
+        assert_eq!(app.picks, [0usize, 1].into_iter().collect());
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(ctrl(KeyCode::Char(' ')));
+        assert_eq!(app.picks, [0usize, 1, 2].into_iter().collect());
+        app.on_key(ctrl(KeyCode::Char(' ')));
+        assert_eq!(app.picks, [0usize, 1].into_iter().collect());
+
+        // Space on a fresh row replaces the whole set, then clears it
+        app.on_key(key(KeyCode::Char(' ')));
+        assert_eq!(app.picks, [2usize].into_iter().collect());
+        app.on_key(key(KeyCode::Char(' ')));
+        assert!(app.picks.is_empty());
+    }
+
+    #[test]
+    fn actions_run_on_the_picked_rows_not_the_cursor() {
+        let mut app = App::with_apps(apps(3));
+        saturate(&mut app);
+        app.picks = [1, 2].into_iter().collect();
+        app.on_key(key(KeyCode::Char('u')));
+        assert_eq!(
+            app.pending
+                .iter()
+                .map(|(r, _)| r.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "c"],
+            "cursor row must be skipped while picks are active"
+        );
+        assert_eq!(app.msg, "2 update queued");
+    }
+
+    #[test]
+    fn a_single_picks_wins_over_the_highlighted_row() {
+        let mut app = App::with_apps(apps(3));
+        saturate(&mut app);
+        app.sel = 0;
+        app.picks = [2].into_iter().collect();
+        app.on_key(key(KeyCode::Char('i')));
+        assert_eq!(
+            app.pending
+                .iter()
+                .map(|(r, _)| r.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c"]
+        );
+        assert_eq!(app.msg, "c queued");
+    }
+
+    #[test]
+    fn cancel_only_touches_picked_rows() {
+        let mut app = App::with_apps(apps(3));
+        app.pending.push_back(("a".into(), Action::Install));
+        app.pending.push_back(("b".into(), Action::Install));
+        app.pending.push_back(("c".into(), Action::Install));
+        app.picks = [1, 2].into_iter().collect();
+        app.on_key(key(KeyCode::Char('x')));
+        assert_eq!(
+            app.pending
+                .iter()
+                .map(|(r, _)| r.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"],
+            "the unpicked cursor row must stay queued"
+        );
+        assert_eq!(app.msg, "2 dequeued");
+    }
+
+    #[test]
+    fn enter_on_a_pick_installs_missing_and_skips_installed() {
+        let mut v = apps(3);
+        v[1].installed = true;
+        let mut app = App::with_apps(v);
+        saturate(&mut app);
+        app.picks = [0, 1].into_iter().collect();
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.pending
+                .iter()
+                .map(|(r, _)| r.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"],
+            "the installed row must not be queued"
+        );
+        assert_eq!(app.msg, "1 install queued · 1 already installed");
     }
 }

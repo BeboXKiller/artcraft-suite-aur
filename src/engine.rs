@@ -4,9 +4,11 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub const SUITE: &[&str] = &[
     "artcraft",
@@ -41,8 +43,18 @@ impl Action {
             Action::Fetch => "fetching",
         }
     }
+
+    /// Imperative form, for messages about a batch of picked rows.
+    pub fn verb(self) -> &'static str {
+        match self {
+            Action::Install => "install",
+            Action::Update => "update",
+            Action::Fetch => "fetch",
+        }
+    }
 }
 
+#[derive(Clone, Debug)]
 pub struct AppInfo {
     pub repo: &'static str,
     pub dir: PathBuf,
@@ -60,6 +72,10 @@ pub enum Ev {
         action: Action,
         result: Result<String, String>,
     },
+    /// Fresh AppInfo for `apps[index]`, computed on a worker thread.
+    Scanned { index: usize, info: AppInfo },
+    /// A full rescan finished.
+    Refreshed,
 }
 
 fn home() -> PathBuf {
@@ -90,6 +106,29 @@ pub fn log_file(repo: &str) -> PathBuf {
     log_dir().join(format!("{repo}.log"))
 }
 
+/// Send a subprocess's stdout/stderr to the repo's log file instead of the terminal.
+///
+/// The TUI owns the tty (raw mode + alternate screen): any child that inherits it
+/// writes straight over the frame buffer and ratatui's diff never learns about it.
+fn attach_log(repo: &str, cmd: &mut Command, mark: &str) -> Result<(), String> {
+    use std::io::Write;
+    let _ = std::fs::create_dir_all(log_dir());
+    let path = log_file(repo);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(f, "\n$ {mark}");
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    let out = opts.open(&path).map_err(|e| format!("log: {e}"))?;
+    let err = out.try_clone().map_err(|e| format!("log: {e}"))?;
+    cmd.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+    Ok(())
+}
+
 fn child_env_path() -> String {
     let mut path = std::env::var("PATH").unwrap_or_default();
     let cargo_bin = home().join(".cargo/bin");
@@ -97,6 +136,39 @@ fn child_env_path() -> String {
         path = format!("{}:{}", cargo_bin.display(), path);
     }
     path
+}
+
+fn pid_registry() -> &'static Arc<Mutex<HashMap<String, u32>>> {
+    static REG: OnceLock<Arc<Mutex<HashMap<String, u32>>>> = OnceLock::new();
+    REG.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+fn run_registered(repo: &str, cmd: &mut Command) -> Result<std::process::ExitStatus, String> {
+    cmd.process_group(0);
+    let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
+    let pid = child.id();
+    if let Ok(mut reg) = pid_registry().lock() {
+        reg.insert(repo.to_string(), pid);
+    }
+    let status = child.wait().map_err(|e| format!("wait: {e}"))?;
+    if let Ok(mut reg) = pid_registry().lock() {
+        reg.remove(repo);
+    }
+    Ok(status)
+}
+
+pub fn cancel(repo: &str) -> bool {
+    let pid = pid_registry()
+        .lock()
+        .ok()
+        .and_then(|r| r.get(repo).copied());
+    let Some(pid) = pid else { return false };
+    let _ = Command::new("kill")
+        .args(["-TERM", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    true
 }
 
 /// Main desktop app package of a repo: the apps/* member that isn't a -cli or -web sibling
@@ -115,7 +187,9 @@ pub fn pkg_of(dir: &Path) -> Option<String> {
             continue;
         }
         let text = std::fs::read_to_string(&c).ok()?;
-        let name = text.lines().find_map(|l| l.strip_prefix("name = \"")?.strip_suffix('"'))?;
+        let name = text
+            .lines()
+            .find_map(|l| l.strip_prefix("name = \"")?.strip_suffix('"'))?;
         if name == repo {
             return Some(name.to_string());
         }
@@ -126,11 +200,40 @@ pub fn pkg_of(dir: &Path) -> Option<String> {
     best
 }
 
+/// Version string of an installed binary.
+///
+/// Bounded by [`VERSION_TIMEOUT`]: a future app that ignores `--version` and stays
+/// alive would otherwise hang `scan()` and every rescan forever.
+const VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn version_of(bin: &Path) -> Option<String> {
-    let out = Command::new(bin).arg("--version").stderr(Stdio::null()).output().ok()?;
-    let line = String::from_utf8_lossy(&out.stdout);
-    let line = line.trim();
-    (!line.is_empty()).then(|| line.to_string())
+    let mut child = Command::new(bin)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + VERSION_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let mut out = String::new();
+    child.stdout.as_mut()?.read_to_string(&mut out).ok()?;
+    out.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
 }
 
 pub fn scan() -> Vec<AppInfo> {
@@ -144,21 +247,30 @@ pub fn scan() -> Vec<AppInfo> {
             let version = installed
                 .then(|| bin_dir().join(pkg.as_ref().unwrap()))
                 .and_then(|b| version_of(&b));
-            AppInfo { repo, dir, pkg, cloned, installed, version, behind: None }
+            let behind = cloned.then(|| behind(&dir)).flatten();
+            AppInfo {
+                repo,
+                dir,
+                pkg,
+                cloned,
+                installed,
+                version,
+                behind,
+            }
         })
         .collect()
 }
 
-pub fn rescan(apps: &mut [AppInfo]) {
-    for a in apps {
-        let pkg = a.cloned.then(|| pkg_of(&a.dir)).flatten();
-        a.installed = pkg.as_ref().is_some_and(|p| bin_dir().join(p).is_file());
-        a.version = a
-            .installed
-            .then(|| bin_dir().join(pkg.as_ref().unwrap()))
-            .and_then(|b| version_of(&b));
-        a.pkg = pkg;
-    }
+pub fn rescan_one(a: &mut AppInfo) {
+    a.cloned = a.dir.join("Cargo.toml").is_file();
+    let pkg = a.cloned.then(|| pkg_of(&a.dir)).flatten();
+    a.installed = pkg.as_ref().is_some_and(|p| bin_dir().join(p).is_file());
+    a.version = a
+        .installed
+        .then(|| bin_dir().join(pkg.as_ref().unwrap()))
+        .and_then(|b| version_of(&b));
+    a.pkg = pkg;
+    a.behind = a.cloned.then(|| behind(&a.dir)).flatten();
 }
 
 fn run_capture(cmd: &str, args: &[&str]) -> Option<String> {
@@ -172,33 +284,64 @@ fn run_capture(cmd: &str, args: &[&str]) -> Option<String> {
 }
 
 fn behind(dir: &Path) -> Option<u64> {
-    run_capture("git", &["-C", &dir.to_string_lossy(), "rev-list", "--count", "HEAD..@{u}"])?
-        .parse()
-        .ok()
+    run_capture(
+        "git",
+        &[
+            "-C",
+            &dir.to_string_lossy(),
+            "rev-list",
+            "--count",
+            "HEAD..@{u}",
+        ],
+    )?
+    .parse()
+    .ok()
 }
 
-fn git_pull(dir: &Path) -> Result<(), String> {
-    let s = Command::new("git")
-        .args(["-C", &dir.to_string_lossy(), "pull", "--ff-only", "-q"])
-        .env("PATH", child_env_path())
-        .status()
-        .map_err(|e| format!("git: {e}"))?;
-    s.success().then_some(()).ok_or_else(|| "git pull failed (local changes?)".into())
+fn git_pull(repo: &str, dir: &Path) -> Result<(), String> {
+    let mut cmd = Command::new("git");
+    cmd.args(["-C", &dir.to_string_lossy(), "pull", "--ff-only"])
+        .env("PATH", child_env_path());
+    attach_log(repo, &mut cmd, "git pull --ff-only")?;
+    let s = run_registered(repo, &mut cmd)?;
+    if s.signal().is_some() {
+        return Err("cancelled".into());
+    }
+    s.success()
+        .then_some(())
+        .ok_or_else(|| "git pull failed (local changes?)".into())
+}
+
+fn git_org() -> String {
+    std::env::var("ARTCRAFT_GIT_ORG").unwrap_or_else(|_| "storytold".into())
 }
 
 fn git_clone(repo: &str, dir: &Path) -> Result<(), String> {
-    let s = Command::new("git")
-        .args([
-            "clone",
-            "--depth",
-            "1",
-            &format!("https://github.com/storytold/{repo}"),
-            &dir.to_string_lossy(),
-        ])
-        .env("PATH", child_env_path())
-        .status()
-        .map_err(|e| format!("git: {e}"))?;
-    s.success().then_some(()).ok_or_else(|| format!("clone of {repo} failed"))
+    let existed = dir.exists();
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "clone",
+        "--depth",
+        "1",
+        &format!("https://github.com/{}/{}", git_org(), repo),
+        &dir.to_string_lossy(),
+    ])
+    .env("PATH", child_env_path());
+    // a clone starts a fresh build cycle: drop the previous run's log
+    let _ = std::fs::remove_file(log_file(repo));
+    attach_log(repo, &mut cmd, "git clone")?;
+    let s = run_registered(repo, &mut cmd)?;
+    if s.signal().is_some() || !s.success() {
+        if !existed {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        return Err(if s.signal().is_some() {
+            "cancelled".into()
+        } else {
+            format!("clone of {repo} failed")
+        });
+    }
+    Ok(())
 }
 
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -233,7 +376,11 @@ fn install_menu_entry(dir: &Path) {
     if icons.is_dir() {
         let _ = copy_tree(&icons, &icon_dir());
     }
-    let _ = Command::new("update-desktop-database").arg(desk_dir()).stdout(Stdio::null()).status();
+    let _ = Command::new("update-desktop-database")
+        .arg(desk_dir())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     let _ = Command::new("gtk-update-icon-cache")
         .args(["-f", "-t"])
         .arg(icon_dir())
@@ -248,14 +395,16 @@ fn build_install(dir: &Path, repo: &str) -> Result<String, String> {
     let log = log_file(repo);
     let file = File::create(&log).map_err(|e| format!("log: {e}"))?;
     let err_file = file.try_clone().map_err(|e| format!("log: {e}"))?;
-    let s = Command::new("cargo")
-        .args(["build", "--release", "-p", &pkg])
+    let mut cmd = Command::new("cargo");
+    cmd.args(["build", "--release", "-p", &pkg])
         .current_dir(dir)
         .env("PATH", child_env_path())
         .stdout(Stdio::from(file))
-        .stderr(Stdio::from(err_file))
-        .status()
-        .map_err(|e| format!("cargo: {e}"))?;
+        .stderr(Stdio::from(err_file));
+    let s = run_registered(repo, &mut cmd)?;
+    if s.signal().is_some() {
+        return Err("cancelled".into());
+    }
     if !s.success() {
         return Err(format!("build failed - see {}", log.display()));
     }
@@ -282,7 +431,7 @@ pub fn run_action(repo: &str, action: Action) -> Result<String, String> {
                 return Err("not cloned - install it first".into());
             }
             let before = run_capture("git", &["-C", &dir.to_string_lossy(), "rev-parse", "HEAD"]);
-            git_pull(&dir)?;
+            git_pull(repo, &dir)?;
             let after = run_capture("git", &["-C", &dir.to_string_lossy(), "rev-parse", "HEAD"]);
             let pkg = pkg_of(&dir);
             let bin_ok = pkg.as_ref().is_some_and(|p| bin_dir().join(p).is_file());
@@ -295,11 +444,14 @@ pub fn run_action(repo: &str, action: Action) -> Result<String, String> {
             if !dir.join("Cargo.toml").is_file() {
                 return Err("not cloned".into());
             }
-            let s = Command::new("git")
-                .args(["-C", &dir.to_string_lossy(), "fetch", "-q"])
-                .env("PATH", child_env_path())
-                .status()
-                .map_err(|e| format!("git: {e}"))?;
+            let mut cmd = Command::new("git");
+            cmd.args(["-C", &dir.to_string_lossy(), "fetch"])
+                .env("PATH", child_env_path());
+            attach_log(repo, &mut cmd, "git fetch")?;
+            let s = run_registered(repo, &mut cmd)?;
+            if s.signal().is_some() {
+                return Err("cancelled".into());
+            }
             if !s.success() {
                 return Err("git fetch failed".into());
             }
@@ -315,7 +467,11 @@ pub fn run_action(repo: &str, action: Action) -> Result<String, String> {
 pub fn spawn(repo: String, action: Action, tx: Sender<Ev>) {
     std::thread::spawn(move || {
         let result = run_action(&repo, action);
-        let _ = tx.send(Ev::Done { repo, action, result });
+        let _ = tx.send(Ev::Done {
+            repo,
+            action,
+            result,
+        });
     });
 }
 
@@ -324,26 +480,36 @@ pub fn launch(pkg: &str) -> Result<(), String> {
     if !bin.is_file() {
         return Err(format!("{pkg} is not installed"));
     }
-    Command::new(&bin)
+    let mut child = Command::new(&bin)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .env("PATH", child_env_path())
         .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("launch: {e}"))
+        .map_err(|e| format!("launch: {e}"))?;
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    match child.try_wait() {
+        Ok(Some(status)) if !status.success() => {
+            Err(format!("{pkg} exited immediately ({status})"))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Last `want` bytes of a log file for the tail pane.
+///
+/// Decoded lossily: a build log can contain invalid UTF-8, and a seek into the
+/// middle of a multi-byte character would make `read_to_string` fail and blank
+/// the whole pane.
 pub fn log_tail(repo: &str, want: u64) -> Option<String> {
     let mut f = File::open(log_file(repo)).ok()?;
     let len = f.metadata().ok()?.len();
     if len > want {
         f.seek(SeekFrom::End(-(want as i64))).ok()?;
     }
-    let mut buf = String::new();
-    f.read_to_string(&mut buf).ok()?;
-    Some(buf)
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 pub fn busy_summary(busy: &HashMap<String, String>) -> Option<String> {
@@ -353,4 +519,71 @@ pub fn busy_summary(busy: &HashMap<String, String>) -> Option<String> {
     let mut parts: Vec<String> = busy.iter().map(|(k, v)| format!("{v} {k}")).collect();
     parts.sort();
     Some(parts.join(" · "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn cleanup(path: &Path) {
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn children_are_wired_to_the_log_file_not_the_tty() {
+        let repo = "engine-test-stdio";
+        let path = log_file(repo);
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "readlink /proc/self/fd/1; readlink /proc/self/fd/2"]);
+        attach_log(repo, &mut cmd, "test marker").expect("attach_log");
+        let status = cmd.status().expect("spawn");
+        assert!(status.success());
+
+        let log = std::fs::read_to_string(&path).expect("log written");
+        let want = path.to_string_lossy().to_string();
+        assert!(
+            log.contains(&want) && log.contains("$ test marker"),
+            "child stdio must point at the log, got:\n{log}"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn log_tail_tolerates_invalid_utf8() {
+        let repo = "engine-test-utf8";
+        let path = log_file(repo);
+        let _ = std::fs::create_dir_all(log_dir());
+        std::fs::write(&path, b"good line\n\xff\xfe broken\n").expect("write");
+
+        let tail = log_tail(repo, 4096).expect("tail");
+        assert!(tail.contains("good line"), "{tail:?}");
+        assert!(
+            tail.contains('\u{FFFD}'),
+            "invalid bytes must be replaced, not dropped: {tail:?}"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn version_probe_gives_up_instead_of_hanging() {
+        let dir = std::env::temp_dir().join("artcraft-suite-aur-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let bin = dir.join("sleeper");
+        std::fs::write(&bin, "#!/bin/sh\nsleep 30\n").expect("write");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+
+        let started = Instant::now();
+        assert!(version_of(&bin).is_none());
+        let took = started.elapsed();
+        assert!(
+            took < VERSION_TIMEOUT + Duration::from_secs(2),
+            "probe took {took:?}"
+        );
+        cleanup(&bin);
+    }
 }
