@@ -410,7 +410,11 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn install_menu_entry(dir: &Path) {
+/// Register the app with the desktop: its `.desktop` entry and hicolor icons
+/// into the user's applications/icons directories, then refresh both caches.
+/// Returns whether an entry was actually copied.
+fn install_menu_entry(dir: &Path) -> bool {
+    let mut registered = false;
     let desk = dir.join("packaging/linux");
     if let Ok(rd) = std::fs::read_dir(&desk) {
         for e in rd.flatten() {
@@ -419,6 +423,7 @@ fn install_menu_entry(dir: &Path) {
                 let _ = std::fs::create_dir_all(desk_dir());
                 if let Some(name) = p.file_name() {
                     let _ = std::fs::copy(&p, desk_dir().join(name));
+                    registered = true;
                 }
                 break;
             }
@@ -439,6 +444,7 @@ fn install_menu_entry(dir: &Path) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+    registered
 }
 
 fn build_install(dir: &Path, repo: &str) -> Result<String, String> {
@@ -464,9 +470,13 @@ fn build_install(dir: &Path, repo: &str) -> Result<String, String> {
     let dst = bin_dir().join(&pkg);
     std::fs::create_dir_all(bin_dir()).map_err(|e| e.to_string())?;
     std::fs::copy(&src, &dst).map_err(|e| format!("install {dst:?}: {e}"))?;
-    install_menu_entry(dir);
+    let menu = install_menu_entry(dir);
     let v = version_of(&dst).unwrap_or_else(|| "ok".into());
-    Ok(format!("installed {pkg} ({v})"))
+    Ok(if menu {
+        format!("installed {pkg} ({v}) · added to app menu")
+    } else {
+        format!("installed {pkg} ({v})")
+    })
 }
 
 pub fn run_action(repo: &str, action: Action) -> Result<String, String> {

@@ -76,11 +76,19 @@ one-line description of the highlighted app (the official getartcraft.com
 blurb); `←` closes it, and several apps can stay open while you move around.
 The header counts the suite at a glance
 (`✓ up to date · ↑ behind · · missing`), the status row is the feedback channel
-(queued/running tasks, `✓ installed photocraft (0.2.0)`, `✗ photocraft ·
-installing: build failed`), and the bottom pane answers "what would `u` even
-change?" with the upstream commits waiting to be pulled — or the live build log
-while a task runs. `?` opens the full key reference: every hint with a one-line
-description of what it does, scrolled with `j`/`k` on short terminals.
+(queued/running tasks, `✓ installed photocraft (0.2.0) · added to app menu`,
+`✗ photocraft · installing: build failed`), and the bottom pane answers "what
+would `u` even change?" with the upstream commits waiting to be pulled — or the
+live build log while a task runs. `?` opens the full key reference: every hint
+with a one-line description of what it does, scrolled with `j`/`k` on short
+terminals.
+
+Every install and rebuild also registers the app on your desktop: the binary
+lands in `~/.local/bin`, the repo's `packaging/linux/*.desktop` entry and its
+hicolor icons are copied into `~/.local/share/applications` and
+`~/.local/share/icons/hicolor`, and the desktop/icon caches are refreshed — so
+the app appears in your app menu right away. The success message says as much
+(`· added to app menu`).
 
 ## Keyboard shortcuts
 
