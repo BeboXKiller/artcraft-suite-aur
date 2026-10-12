@@ -1,49 +1,20 @@
-//! Layout and widgets: header, suite list, log tail, key bar, help overlay.
+//! Layout and widgets: header, suite list, details pane, key bar, help overlay.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::app::App;
+use crate::app::{App, Tone};
+use crate::engine::AppInfo;
+use crate::theme::{Sty, Tint};
 
 /// Smallest grid this layout is designed for; below it we show a polite message.
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 15;
-/// Log lines kept visible in the tail pane (the block is `Length(7)`).
-const LOG_LINES: usize = 5;
-
-/// Color policy for a frame.
-///
-/// Honors `NO_COLOR` by dropping fg/bg colors while keeping bold/reverse, which
-/// every terminal renders — so the UI never depends on color alone anyway.
-#[derive(Clone, Copy)]
-struct Sty {
-    color: bool,
-}
-
-impl Sty {
-    fn fg(self, color: Color) -> Style {
-        if self.color {
-            Style::default().fg(color)
-        } else {
-            Style::default()
-        }
-    }
-
-    fn bold(self) -> Style {
-        Style::default().bold()
-    }
-
-    fn hl(self) -> Style {
-        if self.color {
-            Style::default().bg(Color::DarkGray).bold()
-        } else {
-            Style::default().reversed().bold()
-        }
-    }
-}
+/// Detail lines kept visible in the bottom pane (the block is `Length(7)`).
+const DETAIL_LINES: usize = 5;
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -69,101 +40,114 @@ pub fn draw(frame: &mut Frame, app: &App) {
     ])
     .areas(area);
 
-    let s = Sty {
-        color: !app.no_color,
+    let s = Sty::new(app.palette);
+    let (status, tone) = app.status_line();
+    let tone_tint = match tone {
+        Tone::Busy => Tint::Accent,
+        Tone::Good => Tint::Good,
+        Tone::Bad => Tint::Bad,
+        Tone::Info => Tint::Muted,
     };
-    let (status, is_busy) = app.status_line();
     let head_text = vec![
         Line::from(vec![
-            Span::styled(" artcraft-suite-aur", s.fg(Color::Cyan).bold()),
-            Span::raw(" — install · update · launch the Craft suite from source"),
-        ]),
-        Line::from(vec![
-            Span::raw(" "),
+            Span::styled(" ArtCraft Suite", s.fg(Tint::Accent).bold()),
             Span::styled(
-                status,
-                s.fg(if is_busy { Color::Yellow } else { Color::Gray }),
+                " — install · update · launch the Craft suite",
+                s.fg(Tint::Muted),
             ),
         ]),
+        Line::from(vec![Span::raw(" "), Span::styled(status, s.fg(tone_tint))]),
     ];
-    frame.render_widget(
-        Paragraph::new(head_text).block(Block::bordered().title(" ArtCraft Suite ")),
-        head,
-    );
+    let mut head_block = Block::bordered().title(" ArtCraft Suite ");
+    let summary = summary(app, s);
+    if !summary.is_empty() {
+        head_block = head_block.title(Line::from(summary).right_aligned());
+    }
+    frame.render_widget(Paragraph::new(head_text).block(head_block), head);
 
-    draw_list(frame, app, main);
-    draw_log(frame, app, tail);
+    draw_list(frame, app, main, s);
+    draw_details(frame, app, tail, s);
     frame.render_widget(
-        Paragraph::new(key_bar(!app.no_color)).alignment(Alignment::Center),
+        Paragraph::new(key_bar(s)).alignment(Alignment::Center),
         keys_row,
     );
 
     if app.show_help {
-        draw_help(frame, area, !app.no_color);
+        draw_help(frame, area, s, app.help_scroll);
     }
 }
 
-fn draw_list(frame: &mut Frame, app: &App, area: Rect) {
-    let s = Sty {
-        color: !app.no_color,
-    };
-    // borders (2) + highlight symbol (2)
-    let inner_w = area.width.saturating_sub(4) as usize;
-    // mark(3) + dot(3) + repo(16) + pkg(22) + version(14) = 58, plus the
-    // behind badge (6) and the state column (10)
-    let show_state = inner_w >= 74;
-
-    let items: Vec<ListItem> = app
+/// Right-aligned header counters: how much is current, behind, or missing.
+fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
+    if app.apps.is_empty() {
+        return Vec::new();
+    }
+    let behind = app
         .apps
         .iter()
-        .enumerate()
-        .map(|(idx, a)| {
-            let (dot, dot_color) = if app.busy.contains_key(a.repo) {
-                ("◐", Color::Yellow)
-            } else if app.pending.iter().any(|(r, _)| r == a.repo) {
-                ("◌", Color::LightBlue)
-            } else if a.installed {
-                ("●", Color::Green)
-            } else if a.cloned {
-                ("○", Color::DarkGray)
-            } else {
-                ("·", Color::DarkGray)
-            };
+        .filter(|a| a.behind.is_some_and(|n| n > 0))
+        .count();
+    let missing = app.apps.iter().filter(|a| !a.cloned).count();
+    let up = app
+        .apps
+        .iter()
+        .filter(|a| a.installed && !a.behind.is_some_and(|n| n > 0))
+        .count();
+    let mut spans = vec![
+        Span::styled(format!(" ✓ {up} "), s.fg(Tint::Good)),
+        Span::styled(format!(" ↑ {behind} "), s.fg(Tint::Warn)),
+        Span::styled(format!(" · {missing} "), s.fg(Tint::Faint)),
+    ];
+    if app.filter_attention {
+        spans.push(Span::styled(" attention ", s.fg(Tint::Accent).bold()));
+    }
+    spans
+}
+
+fn draw_list(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
+    // borders (2) + highlight symbol (2)
+    let inner_w = area.width.saturating_sub(4) as usize;
+    // mark(3) + glyph(5) + repo(16) + version(11) = 35, then " phrase"
+    let show_version = inner_w >= 52;
+
+    let vis = app.visible_rows();
+    let items: Vec<ListItem> = vis
+        .iter()
+        .map(|&idx| {
+            let a = &app.apps[idx];
+            let (glyph, phrase, tint) = row_state(app, a);
+            let selected = idx == app.sel;
             let (mark, mark_style) = if app.picks.contains(&idx) {
-                ("☑", s.bold())
+                if selected {
+                    ("■", s.fg(Tint::Ink).bold())
+                } else {
+                    ("■", s.fg(Tint::Accent).bold())
+                }
             } else {
-                ("☐", s.fg(Color::DarkGray))
+                ("□", s.fg(Tint::Faint))
             };
-            let version = a.version.as_deref().unwrap_or("-");
-            let behind = match a.behind {
-                Some(n) if n > 0 => format!("  ↑{n}"),
-                _ => String::new(),
-            };
-            let pkg = a.pkg.as_deref().unwrap_or("-");
-            let state = match (a.installed, a.cloned) {
-                (true, _) => " installed",
-                (_, true) => " cloned",
-                _ => "",
-            };
-            let state = if show_state { state } else { "" };
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(format!(" {mark} "), mark_style),
-                Span::styled(format!(" {dot} "), s.fg(dot_color)),
+                Span::styled(format!(" {} ", pad(&glyph, 3)), s.fg(tint)),
                 Span::styled(pad(a.repo, 16), s.bold()),
-                Span::styled(pad(pkg, 22), s.fg(Color::Gray)),
-                Span::styled(pad(version, 14), Style::default()),
-                Span::styled(behind, s.fg(Color::Magenta)),
-                Span::styled(state, s.fg(Color::Gray)),
-            ]))
+            ];
+            if show_version {
+                spans.push(Span::styled(
+                    pad(a.version.as_deref().unwrap_or("-"), 11),
+                    s.fg(Tint::Muted),
+                ));
+            }
+            spans.push(Span::styled(format!(" {phrase}"), s.fg(tint)));
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
-    let mut title = format!(" Apps ({})", app.apps.len());
+    let mut title = format!(" Apps ({})", vis.len());
     if !app.picks.is_empty() {
         title.push_str(&format!(" · {} picked", app.picks.len()));
     }
-    if area.width >= 76 {
-        title.push_str("  ● installed  ○ cloned  · missing  ◐ busy  ◌ queued");
+    if app.filter_attention {
+        title.push_str(" · attention only");
     }
     title.push(' ');
     let list = List::new(items)
@@ -171,56 +155,202 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect) {
         .highlight_style(s.hl())
         .highlight_symbol("▶ ");
     let mut state = ListState::default();
-    state.select(Some(app.sel));
+    state.select(vis.iter().position(|&i| i == app.sel));
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_log(frame: &mut Frame, app: &App, area: Rect) {
-    let s = Sty {
-        color: !app.no_color,
-    };
-    let sel_repo = app.apps.get(app.sel).map(|a| a.repo).unwrap_or("");
-    let lines: Vec<Line> = if app.log.is_empty() {
-        vec![Line::from("(no build log for the selected app)")]
+/// One row's state: a glyph, the same fact in words, and its brand colour.
+///
+/// Colour never carries the meaning alone — the phrase and the glyph do.
+fn row_state(app: &App, a: &AppInfo) -> (String, String, Tint) {
+    if let Some(verb) = app.busy.get(a.repo) {
+        return ("◐".into(), format!("{verb}…"), Tint::Accent);
+    }
+    if app.pending.iter().any(|(r, _)| r == a.repo) {
+        return ("◌".into(), "queued".into(), Tint::Accent);
+    }
+    if app.failed.contains_key(a.repo) {
+        return ("✗".into(), "build failed".into(), Tint::Bad);
+    }
+    if a.installed {
+        match a.behind {
+            Some(n) if n > 0 => (
+                behind_glyph(n),
+                format!("{n} {} behind", commit_word(n)),
+                Tint::Warn,
+            ),
+            _ => ("✓".into(), "up to date".into(), Tint::Good),
+        }
+    } else if a.cloned {
+        ("○".into(), "cloned, not built".into(), Tint::Muted)
     } else {
-        let start = app.log.len().saturating_sub(LOG_LINES);
-        app.log[start..]
-            .iter()
-            .map(|l| Line::from(Span::styled(l.clone(), s.fg(Color::Gray))))
-            .collect()
+        ("·".into(), "not installed".into(), Tint::Faint)
+    }
+}
+
+fn behind_glyph(n: u64) -> String {
+    if n < 100 {
+        format!("↑{n}")
+    } else {
+        "↑99+".into()
+    }
+}
+
+fn commit_word(n: u64) -> &'static str {
+    if n == 1 { "commit" } else { "commits" }
+}
+
+/// The bottom pane: the live log while a task runs, the update's contents
+/// otherwise — what the next `u` would actually bring.
+fn draw_details(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
+    let width = area.width.saturating_sub(4) as usize;
+    let Some(a) = app.apps.get(app.sel) else {
+        frame.render_widget(
+            Paragraph::new(" nothing to show — no apps scanned ")
+                .block(Block::bordered().title(" Details ")),
+            area,
+        );
+        return;
     };
+    let (title, lines) = details_for(app, a, s, width);
     frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(format!(" Log — {sel_repo} "))),
+        Paragraph::new(lines).block(Block::bordered().title(title)),
         area,
     );
 }
 
-fn key_bar(color: bool) -> Vec<Line<'static>> {
-    let c = Sty { color }.fg(Color::Cyan);
+fn details_for<'a>(app: &App, a: &AppInfo, s: Sty, width: usize) -> (String, Vec<Line<'a>>) {
+    let repo = a.repo;
+    if let Some(verb) = app.busy.get(repo) {
+        let title = format!(" {verb} — {repo} ");
+        let lines = tail_lines(&app.log, s.fg(Tint::Muted), width, "(waiting for output…)");
+        return (title, lines);
+    }
+    if let Some(err) = app.failed.get(repo) {
+        let title = format!(" ✗ {repo} — build failed ");
+        let mut lines = vec![Line::from(Span::styled(format!(" {err}"), s.fg(Tint::Bad)))];
+        lines.extend(tail_lines(
+            &app.log,
+            s.fg(Tint::Muted),
+            width,
+            "(no log kept)",
+        ));
+        lines.push(Line::from(Span::styled(
+            " x clears · r rescans · i retries",
+            s.fg(Tint::Faint),
+        )));
+        return (title, lines);
+    }
+    match a.behind {
+        Some(n) if n > 0 => {
+            let title = format!(" What's new in {repo} ");
+            let version = a.version.as_deref().unwrap_or("no version");
+            let mut lines = vec![Line::from(Span::styled(
+                format!(" {version} · {n} {} to pull", commit_word(n)),
+                s.fg(Tint::Warn).bold(),
+            ))];
+            if a.commits.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    " (commit list unknown — f refreshes)",
+                    s.fg(Tint::Faint),
+                )));
+            }
+            for c in a.commits.iter().take(DETAIL_LINES) {
+                lines.push(Line::from(Span::styled(
+                    format!(" {}", clip(c, width.saturating_sub(2))),
+                    s.fg(Tint::Muted),
+                )));
+            }
+            let more = a.commits.len().saturating_sub(DETAIL_LINES);
+            let hint = if more > 0 {
+                format!("+{more} more · f refreshes · u updates")
+            } else {
+                "f refreshes · u updates".to_string()
+            };
+            lines.push(Line::from(Span::styled(
+                format!(" {hint}"),
+                s.fg(Tint::Faint),
+            )));
+            (title, lines)
+        }
+        _ if a.installed => {
+            let version = a.version.as_deref().unwrap_or("no version");
+            (
+                format!(" {repo} — up to date "),
+                vec![
+                    Line::from(Span::styled(
+                        format!(" {version} · nothing to pull"),
+                        s.fg(Tint::Good),
+                    )),
+                    Line::from(Span::styled(
+                        " Enter launches · u updates · i reinstalls",
+                        s.fg(Tint::Faint),
+                    )),
+                ],
+            )
+        }
+        _ if a.cloned => (
+            format!(" {repo} — cloned, not built "),
+            vec![Line::from(Span::styled(
+                " i builds and installs it",
+                s.fg(Tint::Faint),
+            ))],
+        ),
+        _ => (
+            format!(" {repo} — not installed "),
+            vec![Line::from(Span::styled(
+                " i clones and builds it",
+                s.fg(Tint::Faint),
+            ))],
+        ),
+    }
+}
+
+fn tail_lines<'a>(
+    log: &[String],
+    style: Style,
+    width: usize,
+    empty: &'static str,
+) -> Vec<Line<'a>> {
+    if log.is_empty() {
+        return vec![Line::from(Span::styled(format!(" {empty}"), style))];
+    }
+    let start = log.len().saturating_sub(DETAIL_LINES);
+    log[start..]
+        .iter()
+        .map(|l| {
+            Line::from(Span::styled(
+                format!(" {}", clip(l, width.saturating_sub(2))),
+                style,
+            ))
+        })
+        .collect()
+}
+
+fn key_bar(s: Sty) -> Vec<Line<'static>> {
+    let c = s.fg(Tint::Accent);
     vec![
         Line::from(vec![
-            Span::styled("[j/k]", c),
-            Span::raw("  "),
             Span::styled("[Space]", c),
             Span::raw(" pick  "),
-            Span::styled("[PgUp/PgDn]", c),
-            Span::raw(" page  "),
+            Span::styled("[Ctrl+Space]", c),
+            Span::raw(" pick more  "),
             Span::styled("[Enter]", c),
             Span::raw(" open  "),
             Span::styled("[u]", c),
             Span::raw(" update  "),
-            Span::styled("[U]", c),
-            Span::raw(" update all"),
+            Span::styled("[o]", c),
+            Span::raw(" attention"),
         ]),
         Line::from(vec![
-            Span::styled("[a]", c),
-            Span::raw(" install all  "),
+            Span::styled("[j/k]", c),
+            Span::raw(" move  "),
+            Span::styled("[U]", c),
+            Span::raw(" update all  "),
             Span::styled("[f]", c),
             Span::raw(" fetch  "),
             Span::styled("[x]", c),
             Span::raw(" cancel  "),
-            Span::styled("[r]", c),
-            Span::raw(" rescan  "),
             Span::styled("[?]", c),
             Span::raw(" help  "),
             Span::styled("[q]", c),
@@ -229,33 +359,61 @@ fn key_bar(color: bool) -> Vec<Line<'static>> {
     ]
 }
 
-fn draw_help(frame: &mut Frame, area: Rect, color: bool) {
-    let s = Sty { color };
-    // 13 lines + 2 border rows: exactly the 60x15 minimum
-    let lines = vec![
-        Line::from(Span::styled("Navigation", s.fg(Color::Cyan).bold())),
-        Line::from("  j/k or ↑↓ move  g/G, Home/End first/last  PgUp/PgDn ±10"),
-        Line::from("  Enter open/install  Space pick  Ctrl+Space toggle picks"),
+fn draw_help(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
+    let h = s.fg(Tint::Accent).bold();
+    // Every hint with a one-line description of what it actually does. Kept
+    // within 58 columns so nothing wraps on the 60x15 minimum; longer than a
+    // small screen, so j/k scroll it.
+    let lines: Vec<Line> = vec![
+        Line::from(Span::styled("Navigation", h)),
+        Line::from("  j/k or ↑↓       move the highlight"),
+        Line::from("  PgUp / PgDn     jump ten rows"),
+        Line::from("  g / G, Home/End first / last app"),
+        Line::from("  o               attention only (hide apps that are fine)"),
         Line::from(""),
-        Line::from(Span::styled("Actions", s.fg(Color::Cyan).bold())),
-        Line::from("  u update    U update all    i install    a install all"),
-        Line::from("  f fetch     r rescan all    x cancel     ? this help"),
+        Line::from(Span::styled(
+            "Picking — what u / i / f / x / Enter act on",
+            h,
+        )),
+        Line::from("  Space           pick the row; press again to unpick"),
+        Line::from("  Ctrl+Space      add or remove a row, keep the rest"),
+        Line::from("  (no picks)      actions apply to the highlighted row"),
         Line::from(""),
-        Line::from(Span::styled("Session", s.fg(Color::Cyan).bold())),
-        Line::from("  q / Esc quit (asks again while tasks run)   Ctrl+C quit"),
-        Line::from(Span::styled("Dots", s.fg(Color::Cyan).bold())),
-        Line::from("  ● installed  ○ cloned  · missing  ◐ running  ◌ queued"),
-        Line::from("  ↑n   commits you are behind upstream"),
+        Line::from(Span::styled("Acting on the picks", h)),
+        Line::from("  Enter           open the app; install it if missing"),
+        Line::from("                   many picks: install every missing one"),
+        Line::from("  u / i / f       update / install / fetch the picks"),
+        Line::from("  U / a           update everything / install everything"),
+        Line::from("  x or Delete     cancel a task, or unqueue a queued one"),
+        Line::from("  r               rescan every app from disk"),
+        Line::from(""),
+        Line::from(Span::styled("Session", h)),
+        Line::from("  ?               open or close this help"),
+        Line::from("  q / Esc         quit — asks again while tasks run"),
+        Line::from("  Ctrl+C          quit immediately"),
+        Line::from(""),
+        Line::from(Span::styled("Reading a row", h)),
+        Line::from("  ✓ up to date    ↑n behind   ◐ updating…   ◌ queued"),
+        Line::from("  ✗ build failed  ○ cloned, not built   · missing"),
+        Line::from("                   colour tier auto · NO_COLOR=1 = mono"),
     ];
     // full-width modal so nothing bleeds around it; capped to the screen so it
     // also fits the 60x15 minimum
     let w = area.width;
-    let h = (lines.len() as u16 + 2).min(area.height);
-    let rect = Rect::new(area.x, area.y + (area.height.saturating_sub(h)) / 2, w, h);
+    let box_h = (lines.len() as u16 + 2).min(area.height);
+    let rect = Rect::new(
+        area.x,
+        area.y + (area.height.saturating_sub(box_h)) / 2,
+        w,
+        box_h,
+    );
+    let inner_h = box_h.saturating_sub(2) as usize;
+    let offset = scroll.min(lines.len().saturating_sub(inner_h));
+    let visible: Vec<Line> = lines.into_iter().skip(offset).collect();
     frame.render_widget(Clear, rect);
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::bordered().title(" Help — ? or Esc to close "))
+        Paragraph::new(visible)
+            .block(Block::bordered().title(" Help — j/k scroll · ? or Esc to close "))
             .wrap(Wrap { trim: false }),
         rect,
     );
@@ -273,13 +431,26 @@ fn pad(s: &str, w: usize) -> String {
     }
 }
 
+/// Truncate to at most `w` characters, marking the cut with an ellipsis.
+fn clip(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        s.to_string()
+    } else {
+        let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
+        t.push('…');
+        t
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::App;
     use crate::engine::AppInfo;
+    use crate::theme::{Depth, Palette};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     fn app() -> App {
         App::with_apps(vec![AppInfo {
@@ -288,10 +459,24 @@ mod tests {
             pkg: Some("photocraft".into()),
             cloned: true,
             installed: true,
-            // deliberately wider than the 14-cell version column
+            // deliberately wider than the 12-cell version column
             version: Some("0.5.0 (dev build) with a very long suffix".into()),
             behind: Some(0),
+            commits: Vec::new(),
         }])
+    }
+
+    fn app_info(repo: &str, cloned: bool, installed: bool, behind: Option<u64>) -> AppInfo {
+        AppInfo {
+            repo: Box::leak(repo.to_string().into_boxed_str()),
+            dir: std::path::PathBuf::from("/nonexistent"),
+            pkg: None,
+            cloned,
+            installed,
+            version: None,
+            behind,
+            commits: Vec::new(),
+        }
     }
 
     fn render(app: &App, w: u16, h: u16) -> Vec<String> {
@@ -328,6 +513,18 @@ mod tests {
     }
 
     #[test]
+    fn header_summarises_the_suite() {
+        let mut a = app();
+        a.apps.push(app_info("wordcraft", true, true, Some(3)));
+        a.apps.push(app_info("cadcraft", false, false, None));
+        let rows = render(&a, 80, 24);
+        let head = rows[0].clone();
+        assert!(head.contains("✓ 1"), "up-to-date count missing: {head:?}");
+        assert!(head.contains("↑ 1"), "behind count missing: {head:?}");
+        assert!(head.contains("· 1"), "missing count missing: {head:?}");
+    }
+
+    #[test]
     fn key_bar_fits_80_columns() {
         let rows = render(&app(), 80, 24);
         let row1 = &rows[rows.len() - 2];
@@ -336,23 +533,98 @@ mod tests {
         assert!(row2.contains("[?]"), "help hint missing: {row2:?}");
         assert!(row1.contains("[Space] pick"), "pick hint missing: {row1:?}");
         assert!(
-            row1.trim_end().ends_with("update all"),
+            row1.contains("[o] attention"),
+            "filter hint missing: {row1:?}"
+        );
+        assert!(
+            row1.trim_end().ends_with("attention"),
             "row 1 was clipped at 80 columns: {row1:?}"
         );
     }
 
     #[test]
-    fn picked_rows_show_a_checkbox_and_the_title_counts_them() {
+    fn up_to_date_rows_say_so_in_words() {
+        let rows = render(&app(), 80, 24);
+        let row = rows
+            .iter()
+            .find(|r| r.contains("photocraft"))
+            .expect("row present");
+        assert!(row.contains('✓'), "no up-to-date glyph: {row:?}");
+        assert!(row.contains("up to date"), "no up-to-date phrase: {row:?}");
+    }
+
+    #[test]
+    fn behind_rows_say_so_in_words() {
         let mut a = app();
-        a.apps.push(AppInfo {
-            repo: "videocraft",
-            dir: std::path::PathBuf::from("/nonexistent"),
-            pkg: None,
-            cloned: false,
-            installed: false,
-            version: None,
-            behind: None,
-        });
+        a.apps.push(app_info("wordcraft", true, true, Some(3)));
+        let rows = render(&a, 80, 24);
+        let row = rows
+            .iter()
+            .find(|r| r.contains("wordcraft"))
+            .expect("row present");
+        assert!(row.contains("↑3"), "no behind glyph: {row:?}");
+        assert!(
+            row.contains("3 commits behind"),
+            "no behind phrase: {row:?}"
+        );
+    }
+
+    #[test]
+    fn details_pane_shows_what_the_update_contains() {
+        let mut a = app();
+        let mut b = app_info("wordcraft", true, true, Some(2));
+        b.commits = vec![
+            "abc1234 fix table borders".into(),
+            "def5678 faster previews".into(),
+        ];
+        a.apps.push(b);
+        a.sel = 1;
+        let rows = render(&a, 80, 24);
+        let joined = rows.join("\n");
+        assert!(joined.contains("What's new in wordcraft"), "{joined:?}");
+        assert!(joined.contains("fix table borders"), "{joined:?}");
+        assert!(joined.contains("2 commits to pull"), "{joined:?}");
+    }
+
+    #[test]
+    fn details_pane_shows_the_live_log_while_busy() {
+        let mut a = app();
+        a.busy.insert("photocraft".into(), "installing".into());
+        a.log = vec!["   Compiling photocraft v0.5.0".into()];
+        let rows = render(&a, 80, 24);
+        let joined = rows.join("\n");
+        assert!(joined.contains("installing — photocraft"), "{joined:?}");
+        assert!(joined.contains("Compiling photocraft"), "{joined:?}");
+    }
+
+    #[test]
+    fn attention_filter_shows_only_what_needs_it() {
+        let mut a = app(); // photocraft: up to date
+        a.apps.push(app_info("wordcraft", true, true, Some(2)));
+        a.apps.push(app_info("cadcraft", false, false, None));
+        a.sel = 0;
+        a.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('o'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(a.filter_attention);
+        assert_eq!(a.visible_rows(), vec![1, 2], "up-to-date row must hide");
+        assert_eq!(a.sel, 1, "the highlight must land on a visible row");
+        let rows = render(&a, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains("attention only")),
+            "the active filter must be visible: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("photocraft")),
+            "filtered-out row still rendered: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn picked_rows_show_a_filled_square_and_the_title_counts_them() {
+        let mut a = app();
+        a.apps.push(app_info("videocraft", false, false, None));
         a.picks.insert(1);
         let rows = render(&a, 80, 24);
         assert!(
@@ -360,17 +632,17 @@ mod tests {
             "picked count missing from the title: {rows:?}"
         );
         assert!(
-            rows.iter().any(|r| r.contains('☑')),
-            "picked row has no checkmark: {rows:?}"
+            rows.iter().any(|r| r.contains('■')),
+            "picked row has no filled square: {rows:?}"
         );
         assert!(
-            rows.iter().any(|r| r.contains('☐')),
-            "unpicked row has no empty box: {rows:?}"
+            rows.iter().any(|r| r.contains('□')),
+            "unpicked row has no empty square: {rows:?}"
         );
     }
 
     #[test]
-    fn wide_fields_do_not_shift_the_state_column() {
+    fn wide_fields_do_not_shift_the_phrase_column() {
         let rows = render(&app(), 80, 24);
         let row = rows
             .iter()
@@ -378,8 +650,8 @@ mod tests {
             .expect("row present");
         assert!(row.contains('…'), "version must be truncated, got: {row:?}");
         assert!(
-            row.contains("installed"),
-            "state column must stay aligned: {row:?}"
+            row.contains("up to date"),
+            "the phrase column must stay aligned: {row:?}"
         );
         assert!(row.chars().count() <= 80, "row wider than the screen");
     }
@@ -401,6 +673,24 @@ mod tests {
         let joined = render(&a, 100, 30).join("\n");
         assert!(joined.contains("Esc to close"));
         assert!(joined.contains("Navigation"));
+        assert!(joined.contains("attention only"));
+        assert!(
+            joined.contains("pick the row; press again to unpick"),
+            "every hint needs a description: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn help_scrolls_to_later_sections() {
+        let mut a = app();
+        a.show_help = true;
+        a.help_scroll = 20;
+        let joined = render(&a, 80, 24).join("\n");
+        assert!(joined.contains("Reading a row"), "{joined:?}");
+        assert!(
+            !joined.contains("Navigation"),
+            "scroll offset ignored: {joined:?}"
+        );
     }
 
     #[test]
@@ -414,18 +704,27 @@ mod tests {
     fn help_fits_the_minimum_terminal() {
         let mut a = app();
         a.show_help = true;
-        let joined = render(&a, 60, 15).join("\n");
-        // last content line must not be clipped at the documented minimum
+        // first screen: nothing wraps at 60 columns (every line fits 58)
+        let top = render(&a, 60, 15).join("\n");
+        assert!(top.contains("Navigation"), "{top:?}");
         assert!(
-            joined.contains("commits you are behind upstream"),
-            "{joined:?}"
+            top.contains("attention only (hide apps that are fine)"),
+            "{top:?}"
+        );
+        // scrolled to the end: the legend is reachable too, and the offset clamps
+        a.help_scroll = 99;
+        let bottom = render(&a, 60, 15).join("\n");
+        assert!(bottom.contains("NO_COLOR=1"), "{bottom:?}");
+        assert!(
+            !bottom.contains("Navigation"),
+            "scroll clamp not applied: {bottom:?}"
         );
     }
 
     #[test]
-    fn no_color_mode_emits_no_colored_cells() {
+    fn mono_palette_emits_no_colored_cells() {
         let mut a = app();
-        a.no_color = true;
+        a.palette = Palette::mono();
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| draw(f, &a)).unwrap();
         let buf = term.backend().buffer();
@@ -436,5 +735,29 @@ mod tests {
                 assert_eq!(cell.bg, Color::Reset, "bg color at {x},{y}");
             }
         }
+    }
+
+    #[test]
+    fn truecolor_palette_paints_status_in_brand_rgb() {
+        let mut a = app();
+        a.palette = Palette::of(Depth::TrueColor);
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| draw(f, &a)).unwrap();
+        let buf = term.backend().buffer();
+        let teal = Color::Rgb(0x3f, 0xd6, 0xb8);
+        let found = (0..24u16).any(|y| (0..80u16).any(|x| buf.cell((x, y)).unwrap().fg == teal));
+        assert!(found, "no cell painted with the brand 'good' teal");
+    }
+
+    #[test]
+    fn ansi16_palette_still_marks_status() {
+        let mut a = app();
+        a.palette = Palette::of(Depth::Ansi16);
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| draw(f, &a)).unwrap();
+        let buf = term.backend().buffer();
+        let found =
+            (0..24u16).any(|y| (0..80u16).any(|x| buf.cell((x, y)).unwrap().fg == Color::Green));
+        assert!(found, "no cell painted with the 16-colour 'good' green");
     }
 }

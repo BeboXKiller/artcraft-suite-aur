@@ -96,17 +96,34 @@ def send(data):
     os.write(fd, data.encode())
 
 
+def marked_line(frame):
+    for line in frame.splitlines():
+        if "▶" in line:
+            return line
+    return ""
+
+
 pump(1.5, "startup")
 send("jjj")
 pump(0.4, "nav")
+send("\x1b[B")  # real Down arrow, not just 'j'
+pump(0.4, "arrow_down")
+send("\x1b[A")  # real Up arrow
+pump(0.4, "arrow_up")
 send(" ")
 pump(0.4, "pick_one")
 send("j\x00")  # Ctrl+Space: toggle a second row
 pump(0.4, "pick_two")
 send("?")
 pump(0.4, "help")
+send("jjjjjjjj")  # scroll the help overlay to its end
+pump(0.4, "help_scrolled")
 send("\x1b")
 pump(0.4, "help_closed")
+send("o")
+pump(0.4, "filter_on")
+send("o")
+pump(0.4, "filter_off")
 send("x")
 pump(0.7, "cancel_msg")
 send("q")
@@ -124,6 +141,9 @@ print(stages["help"])
 print("===== after two picks =====")
 for line in stages["pick_two"].splitlines()[:5]:
     print(line)
+print("===== attention filter on =====")
+for line in stages["filter_on"].splitlines()[:6]:
+    print(line)
 print("===== after x (status feedback) =====")
 for line in stages["cancel_msg"].splitlines()[:4]:
     print(line)
@@ -134,18 +154,38 @@ checks = [
     ("cursor restored", "\x1b[?25h" in text),
     ("header rendered", "ArtCraft Suite" in stages["startup"]),
     ("status line rendered", "ready" in stages["startup"]),
-    ("app list rendered", "Apps (15)" in stages["startup"]),
-    ("dot legend rendered", "◐ busy" in stages["startup"] and "◌ queued" in stages["startup"]),
-    ("key bar row 1", "[Space] pick" in stages["startup"]),
-    ("key bar row 1 not clipped", stages["startup"].splitlines()[-2].rstrip().endswith("update all")),
-    ("key bar row 2", "[q] quit" in stages["startup"]),
+    ("header summary rendered", "✓ " in stages["startup"] and "↑ " in stages["startup"]),
+    ("app list rendered", "Apps (" in stages["startup"]),
+    ("status phrases rendered", any(
+        p in stages["startup"]
+        for p in ("up to date", "not installed", "cloned, not built", "behind")
+    )),
+    ("details pane rendered", any(
+        p in stages["startup"]
+        for p in ("What's new in", "up to date", "not installed", "cloned, not built")
+    )),
+    ("key bar row 1", "[Space] pick" in stages["startup"]
+     and "[Ctrl+Space] pick more" in stages["startup"] and "[o] attention" in stages["startup"]),
+    ("key bar row 1 not clipped", stages["startup"].splitlines()[-2].rstrip().endswith("attention")),
+    ("key bar row 2", "[q] quit" in stages["startup"] and "[j/k] move" in stages["startup"]),
+    ("key bar row 2 not clipped", stages["startup"].splitlines()[-1].rstrip().endswith("quit")),
     ("selection moved", "▶ " in stages["nav"] and stages["nav"].count("▶") == 1),
-    ("empty checkboxes drawn", "☐" in stages["startup"]),
-    ("Space picks the row", "☑" in stages["pick_one"] and "· 1 picked" in stages["pick_one"]),
+    ("Down arrow moves selection", marked_line(stages["arrow_down"]) != ""
+     and marked_line(stages["arrow_down"]) != marked_line(stages["nav"])),
+    ("Up arrow moves selection back", marked_line(stages["arrow_up"]) == marked_line(stages["nav"])),
+    ("empty squares drawn", "□" in stages["startup"]),
+    ("Space fills the square", "■" in stages["pick_one"] and "· 1 picked" in stages["pick_one"]),
     ("Ctrl+Space adds a pick", "· 2 picked" in stages["pick_two"]),
     ("help overlay rendered", "Esc to close" in stages["help"]),
-    ("help legend rendered", "commits you are behind upstream" in stages["help"]),
+    ("help describes each hint", "pick the row; press again to unpick" in stages["help"]
+     and "j/k or" in stages["help"]),
+    ("help scrolls to the legend", "Reading a row" in stages["help_scrolled"]
+     and "up to date" in stages["help_scrolled"]
+     and "Navigation" not in stages["help_scrolled"]),
     ("help closes on Esc", "Esc to close" not in stages["help_closed"]),
+    ("attention filter engages", "attention only" in stages["filter_on"]
+     or "nothing needs attention" in stages["filter_on"]),
+    ("attention filter clears", "attention only" not in stages["filter_off"]),
     ("idle-cancel feedback rendered", "nothing to cancel" in stages["cancel_msg"]),
     ("status survives redraw", "cadcraft" in stages["cancel_msg"] or "designcraft" in stages["cancel_msg"]),
     ("exit code 0", code == 0),

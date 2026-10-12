@@ -63,6 +63,9 @@ pub struct AppInfo {
     pub installed: bool,
     pub version: Option<String>,
     pub behind: Option<u64>,
+    /// Upstream commits waiting to be pulled (`git log --oneline HEAD..@{u}`),
+    /// newest last — what the update actually contains.
+    pub commits: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -248,6 +251,11 @@ pub fn scan() -> Vec<AppInfo> {
                 .then(|| bin_dir().join(pkg.as_ref().unwrap()))
                 .and_then(|b| version_of(&b));
             let behind = cloned.then(|| behind(&dir)).flatten();
+            let commits = if cloned {
+                upstream_commits(&dir)
+            } else {
+                Vec::new()
+            };
             AppInfo {
                 repo,
                 dir,
@@ -256,6 +264,7 @@ pub fn scan() -> Vec<AppInfo> {
                 installed,
                 version,
                 behind,
+                commits,
             }
         })
         .collect()
@@ -271,6 +280,11 @@ pub fn rescan_one(a: &mut AppInfo) {
         .and_then(|b| version_of(&b));
     a.pkg = pkg;
     a.behind = a.cloned.then(|| behind(&a.dir)).flatten();
+    a.commits = if a.cloned {
+        upstream_commits(&a.dir)
+    } else {
+        Vec::new()
+    };
 }
 
 fn run_capture(cmd: &str, args: &[&str]) -> Option<String> {
@@ -296,6 +310,25 @@ fn behind(dir: &Path) -> Option<u64> {
     )?
     .parse()
     .ok()
+}
+
+/// Upstream commits the next pull would bring, from the same cached refs as
+/// [`behind`] — no network, so it is as fresh (or as stale) as the count.
+fn upstream_commits(dir: &Path) -> Vec<String> {
+    let out = run_capture(
+        "git",
+        &[
+            "-C",
+            &dir.to_string_lossy(),
+            "log",
+            "--oneline",
+            "-8",
+            "HEAD..@{u}",
+        ],
+    );
+    out.filter(|s| !s.is_empty())
+        .map(|s| s.lines().map(str::to_string).collect())
+        .unwrap_or_default()
 }
 
 fn git_pull(repo: &str, dir: &Path) -> Result<(), String> {

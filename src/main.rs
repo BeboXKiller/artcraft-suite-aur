@@ -2,6 +2,7 @@
 
 mod app;
 mod engine;
+mod theme;
 mod ui;
 
 use std::io::IsTerminal;

@@ -13,8 +13,10 @@ build, install and launch each app without leaving the keyboard.
 | Network | access to `github.com` (clone/pull/fetch) |
 | Non-interactive mode | none — `--status` works anywhere, including pipes and CI |
 
-Anything beyond that (256 colors, wide terminals) is an enhancement: the UI sticks
-to the 16 ANSI colors and degrades gracefully below 90 columns.
+Anything beyond that is an enhancement: the brand palette is richest where the
+terminal allows it — 24-bit colour, then xterm-256, then the 16 ANSI colours,
+then monochrome under `NO_COLOR` — and the layout degrades gracefully down to
+60 columns.
 
 ## Installation
 
@@ -44,25 +46,36 @@ full-screen UI: it prints the `--status` format and a hint on stderr, then exits
 ### Layout
 
 ```text
-┌ ArtCraft Suite ────────────────────────────────────────────────────────────┐
-│ artcraft-suite-aur — install · update · launch the Craft suite from source │
-│ installed photocraft (0.5.0) · 2 queued                                    │   ← status / errors
+┌ ArtCraft Suite ───────────────────────────────────────────── ✓ 6  ↑ 3  · 2 ┐
+│ ArtCraft Suite — install · update · launch the Craft suite                 │
+│ ✓ 1 update ready — u updates wordcraft                                     │   ← status / errors
 └────────────────────────────────────────────────────────────────────────────┘
-┌ Apps (15) · 1 picked  ● installed  ○ cloned  · missing  ◐ busy  ◌ queued ──┐
-│▶  ☑  ● photocraft      photocraft            0.5.0 (dev bu… installed      │   ← picked + selected
-│   ☐  · wordcraft       -                     -                             │
+┌ Apps (15) · 1 picked ──────────────────────────────────────────────────────┐
+│▶  ■  ✓ photocraft      0.2.0       up to date                              │   ← picked + selected
+│   □  ↑3 wordcraft       0.1.42      3 commits behind                       │
+│   □  ◐ deckcraft       0.3.1       updating…                               │
+│   □  · cadcraft        -           not installed                           │
 └────────────────────────────────────────────────────────────────────────────┘
-┌ Log — photocraft ─────────────────────────────────────────────────────────────────┐
-│ $ git pull --ff-only                                                      │   ← git + build output
-│    Compiling photocraft v0.5.0                                            │
+┌ What's new in wordcraft ───────────────────────────────────────────────────┐
+│ 0.1.42 · 3 commits to pull                                                 │   ← the update's contents
+│ 9f8e7d6 fix .docx table borders                                            │
+│ f refreshes · u updates                                                    │
 └────────────────────────────────────────────────────────────────────────────┘
- [j/k]  [Space] pick  [PgUp/PgDn] page  [Enter] open  [u] update  [U] update all
-     [a] install all  [f] fetch  [x] cancel  [r] rescan  [?] help  [q] quit
+ [Space] pick  [Ctrl+Space] pick more  [Enter] open  [u] update  [o] attention
+ [j/k] move  [U] update all  [f] fetch  [x] cancel  [?] help  [q] quit
 ```
 
-The status row is the single feedback channel: queued/running tasks, "installed
-photocraft (0.5.0)", and errors like `photocraft · installing: build failed - see …`
-all appear there. `?` opens the full key reference.
+Every row states its situation twice — a glyph and the same fact in words
+(`✓ up to date`, `↑3 3 commits behind`, `◐ updating…`, `✗ build failed`) — so
+nothing depends on colour alone. A picked row fills its square (`■`) in brand
+blue — ink on the selected row so it stays visible on the accent bar — while
+unpicked rows keep an empty `□`. The header counts the suite at a glance
+(`✓ up to date · ↑ behind · · missing`), the status row is the feedback channel
+(queued/running tasks, `✓ installed photocraft (0.2.0)`, `✗ photocraft ·
+installing: build failed`), and the bottom pane answers "what would `u` even
+change?" with the upstream commits waiting to be pulled — or the live build log
+while a task runs. `?` opens the full key reference: every hint with a one-line
+description of what it does, scrolled with `j`/`k` on short terminals.
 
 ## Keyboard shortcuts
 
@@ -76,6 +89,7 @@ all appear there. `?` opens the full key reference.
 | `Enter` | launch the selected app, or install it if missing; on a multi-pick, install every missing one |
 | `u` / `i` / `f` | update / install / fetch — the picked rows, or the highlighted row when nothing is picked |
 | `U` / `a` | update everything cloned / install everything missing |
+| `o` | toggle **attention only** — hide the apps that are up to date |
 | `x` / `Delete` | cancel the running task, or dequeue a queued one — again over the picked set |
 | `r` | rescan all apps from disk (on a background thread) |
 | `?` | toggle the help overlay |
@@ -86,8 +100,34 @@ all appear there. `?` opens the full key reference.
 "install all" by accident — only `Ctrl+Space` (pick) and `Ctrl+C`/`Ctrl+D`
 (quit) do anything. Picking is a temporary selection: `u`, `i`, `f`, `x` and
 `Enter` look at the picked rows first and fall back to the highlighted row when
-nothing is picked, so the checkboxes always win. At most 2 tasks run at once;
-the rest queue up (shown as `◌` and in the status row).
+nothing is picked, so the picks always win. `o` narrows the list to the
+apps that need attention (missing, behind upstream, or failed) — the highlight
+follows the filter, and the header badge says when it is on. At most 2 tasks
+run at once; the rest queue up (shown as `◌` and in the status row).
+
+## Theme
+
+The palette is the ArtCraft brand — the same colour tokens as getartcraft.com
+and the official launcher — assigned by meaning, never for decoration:
+
+| Role | Colour (dark) | Used for |
+|---|---|---|
+| accent | `#2d81ff` | selection, running tasks, key hints |
+| good | `#3fd6b8` (teal) | `✓ up to date`, success messages |
+| warn | `#ffc14d` (amber) | `↑n commits behind`, update counts |
+| bad | `#ff6259` (coral) | `✗ build failed`, error messages |
+| muted / faint | warm greys | versions, hints, secondary text |
+
+The richest tier the terminal supports is used automatically: 24-bit RGB when
+`COLORTERM`/`TERM` advertise it, xterm-256 approximations otherwise, named ANSI
+16 colours below that, and no colour at all under `NO_COLOR`, where bold and
+reverse video still carry every state. Each state is also a glyph and a phrase
+(`✓ up to date`, `↑3 commits behind`, `◐ updating…`, `✗ build failed`), so the
+UI never depends on colour alone.
+
+| Variable | Effect | Default |
+|---|---|---|
+| `ARTCRAFT_THEME` | `light` = darker ink for light terminal backgrounds | `dark` |
 
 ## Configuration
 
@@ -106,9 +146,11 @@ terminal, which the UI owns).
 | Feature | Status |
 |---|---|
 | TTY, UTF-8, 60x15 | **required** for the UI; `--status`/`--help` need nothing |
-| 16 colors | supported — no truecolor dependency |
-| 256-color terminals | supported |
-| `NO_COLOR`, `TERM=dumb` | UI not supported: it prints plain `--status` output instead |
+| truecolor | brand RGB palette, when `COLORTERM`/`TERM` advertise it |
+| 256-color | brand palette approximated from the xterm-256 palette |
+| 16 colors | brand roles as Blue / Green / Yellow / Red |
+| `NO_COLOR` | UI runs monochrome — bold and reverse video carry the states |
+| `TERM=dumb` | UI not supported: it prints plain `--status` output instead |
 | Resize | handled; below 60x15 you get a "terminal too small" message |
 | Mouse | not used (keyboard-first) |
 | BiDi / RTL (Arabic, Hebrew) | not implemented — layout is left-to-right |
@@ -158,26 +200,34 @@ Source layout — concerns are kept separate on purpose:
 | File | Responsibility |
 |---|---|
 | `src/main.rs` | CLI flags, TTY detection, event loop, terminal init/restore |
-| `src/app.rs` | state: selection, task queue, key → action mapping |
-| `src/engine.rs` | domain: suite registry, git/cargo processes, logs, install |
+| `src/app.rs` | state: selection, picks, task queue, filter, key → action mapping |
+| `src/engine.rs` | domain: suite registry, git/cargo processes, logs, changelogs, install |
+| `src/theme.rs` | brand palette + colour-depth detection (truecolor → 256 → 16 → mono) |
 | `src/ui.rs` | rendering only: a pure function of state + terminal size |
 
 ### Testing
 
 - **Golden frames** (`src/ui.rs`): render at fixed sizes with `TestBackend` and
-  assert on what the user sees — status row visible, key bar fits 80 columns,
-  overlong fields truncated instead of shifting columns, picked rows show a
-  checkbox and the title counts them, help fits 60x15, polite message below the
+  assert on what the user sees — header summary counts, status glyphs *and*
+  their phrases (`✓ up to date`, `↑3 commits behind`), the changelog pane,
+  the live-log handoff, the attention filter, picked squares, the key bar
+  fitting 80 columns, help fitting 60x15, and the polite message below the
   minimum.
+- **Palette** (`src/theme.rs`): every tier is asserted — monochrome yields no
+  colour at all, truecolor paints the brand RGB, 256/16 fall back sensibly,
+  and focus still shows via reverse video when colour is gone.
 - **Interaction** (`src/app.rs`): scripted key sequences → assert state. Covers
   selection clamping, `Ctrl+C`, the help overlay swallowing keys, two-step quit,
   dequeueing, `Space`/`Ctrl+Space` picking, batch actions over the picked set
-  (never the cursor row), and `Enter` installing only the missing picks.
+  (never the cursor row), `Enter` installing only the missing picks, the `o`
+  attention filter (including clamping the highlight onto a visible row), failed
+  tasks counting as attention, and status tone following the message prefix.
 - **Engine** (`src/engine.rs`): children are wired to the log file (not the tty),
   `log_tail` survives invalid UTF-8, the version probe respects its timeout.
 - **End-to-end** (`scripts/tui_smoke.py`): boots the real binary in a sized pty,
   sends real keys, replays the output through a minimal ANSI screen and checks
-  alt-screen entry/exit, cursor restore and the frames themselves.
+  alt-screen entry/exit, cursor restore, the summary counters, status phrases,
+  the details pane, picking, the attention filter and the frames themselves.
 
 ## License
 

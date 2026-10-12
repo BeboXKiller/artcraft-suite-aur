@@ -8,12 +8,22 @@ use std::sync::mpsc::{Receiver, Sender};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::engine::{self, Action, AppInfo, Ev};
+use crate::theme::Palette;
 
 const MAX_PARALLEL: usize = 2;
 /// Rows a PageUp/PageDown jumps; close to a typical list viewport height.
 const PAGE: usize = 10;
 /// Bytes of build log cached for the tail pane.
 const LOG_BYTES: u64 = 4096;
+
+/// The status line's tone, derived from the message prefix (`✓` / `✗`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Info,
+    Good,
+    Bad,
+    Busy,
+}
 
 pub struct App {
     pub apps: Vec<AppInfo>,
@@ -23,12 +33,18 @@ pub struct App {
     pub picks: HashSet<usize>,
     pub busy: HashMap<String, String>,
     pub pending: VecDeque<(String, Action)>,
+    /// repo → error of the last failed task, until a retry clears it
+    pub failed: HashMap<String, String>,
+    /// `o`: show only apps that need attention
+    pub filter_attention: bool,
     pub msg: String,
     pub quit: bool,
     /// `?` overlay
     pub show_help: bool,
-    /// `NO_COLOR` set: render without ANSI colors (bold/reverse still used)
-    pub no_color: bool,
+    /// scroll offset inside the help overlay (it is longer than a small screen)
+    pub help_scroll: usize,
+    /// brand palette for this terminal (see [`crate::theme`])
+    pub palette: Palette,
     /// second `q` required while tasks are running
     confirm_quit: bool,
     /// Tail of the selected repo's log, refreshed by [`Self::refresh_log`].
@@ -46,10 +62,13 @@ impl App {
             picks: HashSet::new(),
             busy: HashMap::new(),
             pending: VecDeque::new(),
+            failed: HashMap::new(),
+            filter_attention: false,
             msg: "ready".into(),
             quit: false,
             show_help: false,
-            no_color: std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
+            help_scroll: 0,
+            palette: Palette::detect(),
             confirm_quit: false,
             log: Vec::new(),
             log_repo: "",
@@ -69,10 +88,17 @@ impl App {
                     result,
                 } => {
                     self.busy.remove(&repo);
-                    self.msg = match result {
-                        Ok(m) => m,
-                        Err(e) => format!("{repo} · {}: {e}", action.label()),
+                    let text = match result {
+                        Ok(m) => {
+                            self.failed.remove(&repo);
+                            format!("✓ {m}")
+                        }
+                        Err(e) => {
+                            self.failed.insert(repo.clone(), e.clone());
+                            format!("✗ {repo} · {}: {e}", action.label())
+                        }
                     };
+                    self.msg = text;
                     if let Some(idx) = self.apps.iter().position(|a| a.repo == repo) {
                         self.rescan_at(idx);
                     }
@@ -89,6 +115,8 @@ impl App {
                 Ev::Refreshed => self.msg = "refreshed".into(),
             }
         }
+        // a rescan can take the highlighted row out of the attention filter
+        self.clamp_selection();
     }
 
     /// Cache the log tail for the selected repo.
@@ -110,7 +138,8 @@ impl App {
             .unwrap_or_default();
     }
 
-    pub fn status_line(&self) -> (String, bool) {
+    /// What the status row says, and how loud it should look.
+    pub fn status_line(&self) -> (String, Tone) {
         let mut parts = Vec::new();
         if let Some(s) = engine::busy_summary(&self.busy) {
             parts.push(s);
@@ -118,11 +147,17 @@ impl App {
         if !self.pending.is_empty() {
             parts.push(format!("{} queued", self.pending.len()));
         }
-        if parts.is_empty() {
-            (self.msg.clone(), false)
-        } else {
-            (parts.join(" · "), true)
+        if !parts.is_empty() {
+            return (parts.join(" · "), Tone::Busy);
         }
+        let tone = if self.msg.starts_with('✗') {
+            Tone::Bad
+        } else if self.msg.starts_with('✓') {
+            Tone::Good
+        } else {
+            Tone::Info
+        };
+        (self.msg.clone(), tone)
     }
 
     fn try_start(&mut self, repo: String, action: Action) {
@@ -133,6 +168,7 @@ impl App {
             self.pending.push_back((repo, action));
             return;
         }
+        self.failed.remove(&repo);
         self.busy.insert(repo.clone(), action.label().into());
         engine::spawn(repo, action, self.tx.clone());
     }
@@ -143,6 +179,7 @@ impl App {
                 self.pending.push_front((repo, action));
                 break;
             }
+            self.failed.remove(&repo);
             self.busy.insert(repo.clone(), action.label().into());
             engine::spawn(repo, action, self.tx.clone());
         }
@@ -193,12 +230,21 @@ impl App {
         }
         if key.code == Char('?') {
             self.show_help = !self.show_help;
+            if self.show_help {
+                self.help_scroll = 0;
+            }
             self.confirm_quit = false;
             return;
         }
         if self.show_help {
-            if matches!(key.code, Esc | Char('q') | Enter) {
-                self.show_help = false;
+            match key.code {
+                Esc | Char('q') | Enter => self.show_help = false,
+                Up | Char('k') => self.help_scroll = self.help_scroll.saturating_sub(1),
+                Down | Char('j') => self.help_scroll = self.help_scroll.saturating_add(1),
+                PageUp => self.help_scroll = self.help_scroll.saturating_sub(PAGE),
+                PageDown => self.help_scroll = self.help_scroll.saturating_add(PAGE),
+                Home | Char('g') => self.help_scroll = 0,
+                _ => {}
             }
             return;
         }
@@ -207,16 +253,16 @@ impl App {
         }
         match key.code {
             Char('q') | Esc => self.request_quit(),
-            Up | Char('k') => self.sel = self.sel.saturating_sub(1),
-            Down | Char('j') => {
-                if self.sel + 1 < self.apps.len() {
-                    self.sel += 1;
-                }
+            Up | Char('k') => self.move_sel(-1),
+            Down | Char('j') => self.move_sel(1),
+            PageUp => self.move_sel(-(PAGE as isize)),
+            PageDown => self.move_sel(PAGE as isize),
+            Home | Char('g') => {
+                self.sel = self.visible_rows().first().copied().unwrap_or(0);
             }
-            PageUp => self.sel = self.sel.saturating_sub(PAGE),
-            PageDown => self.sel = (self.sel + PAGE).min(self.apps.len().saturating_sub(1)),
-            Home | Char('g') => self.sel = 0,
-            End | Char('G') => self.sel = self.apps.len().saturating_sub(1),
+            End | Char('G') => {
+                self.sel = self.visible_rows().last().copied().unwrap_or(0);
+            }
             Enter => self.enter(),
             Char(' ') => self.pick_one(),
             Char('u') => self.start_action(Action::Update),
@@ -261,7 +307,67 @@ impl App {
                 self.rescan_all();
                 self.msg = "refreshing…".into();
             }
+            Char('o') => {
+                self.filter_attention = !self.filter_attention;
+                self.clamp_selection();
+                self.msg = if !self.filter_attention {
+                    "filter cleared".into()
+                } else {
+                    let shown = self.visible_rows().len();
+                    if shown == 0 {
+                        "✓ nothing needs attention".into()
+                    } else {
+                        format!("filter: needs attention ({shown} shown)")
+                    }
+                };
+            }
             _ => {}
+        }
+    }
+
+    /// Rows the list currently shows: all of them, or just the ones needing attention.
+    pub fn visible_rows(&self) -> Vec<usize> {
+        if !self.filter_attention {
+            return (0..self.apps.len()).collect();
+        }
+        self.apps
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| self.needs_attention(a))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Missing, behind upstream, or failed — the rows `o` keeps.
+    pub fn needs_attention(&self, a: &AppInfo) -> bool {
+        !a.installed || a.behind.is_some_and(|n| n > 0) || self.failed.contains_key(a.repo)
+    }
+
+    /// Step the highlight by `step` rows *within what is visible*.
+    fn move_sel(&mut self, step: isize) {
+        let vis = self.visible_rows();
+        if vis.is_empty() {
+            return;
+        }
+        let pos = vis.iter().position(|&i| i == self.sel).unwrap_or(0) as isize;
+        let next = (pos + step).clamp(0, vis.len() as isize - 1) as usize;
+        self.sel = vis[next];
+    }
+
+    /// Keep the highlight on a row the list is actually showing.
+    fn clamp_selection(&mut self) {
+        let vis = self.visible_rows();
+        if vis.is_empty() {
+            self.filter_attention = false;
+            self.sel = self.sel.min(self.apps.len().saturating_sub(1));
+            return;
+        }
+        if !vis.contains(&self.sel) {
+            self.sel = vis
+                .iter()
+                .copied()
+                .find(|&i| i >= self.sel)
+                .unwrap_or_else(|| *vis.last().unwrap());
         }
     }
 
@@ -492,10 +598,13 @@ impl App {
             picks: HashSet::new(),
             busy: HashMap::new(),
             pending: VecDeque::new(),
+            failed: HashMap::new(),
+            filter_attention: false,
             msg: "ready".into(),
             quit: false,
             show_help: false,
-            no_color: false,
+            help_scroll: 0,
+            palette: Palette::of(crate::theme::Depth::TrueColor),
             confirm_quit: false,
             log: Vec::new(),
             log_repo: "",
@@ -520,8 +629,23 @@ mod tests {
                 installed: false,
                 version: None,
                 behind: None,
+                commits: Vec::new(),
             })
             .collect()
+    }
+
+    /// One app, described by hand: `(repo, cloned, installed, behind)`.
+    fn one(repo: &str, cloned: bool, installed: bool, behind: Option<u64>) -> AppInfo {
+        AppInfo {
+            repo: Box::leak(repo.to_string().into_boxed_str()),
+            dir: std::path::PathBuf::from("/nonexistent"),
+            pkg: None,
+            cloned,
+            installed,
+            version: None,
+            behind,
+            commits: Vec::new(),
+        }
     }
 
     static TEST_REPOS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
@@ -566,6 +690,28 @@ mod tests {
         assert!(!app.show_help);
         app.on_key(key(KeyCode::Down));
         assert_eq!(app.sel, 1);
+    }
+
+    #[test]
+    fn help_scrolls_with_j_and_k_without_moving_selection() {
+        let mut app = App::with_apps(apps(3));
+        app.sel = 2;
+        app.on_key(key(KeyCode::Char('?')));
+        assert_eq!(app.help_scroll, 0, "opening starts at the top");
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.help_scroll, 2);
+        assert_eq!(
+            app.sel, 2,
+            "the app selection must not move under the overlay"
+        );
+        app.on_key(key(KeyCode::Char('k')));
+        assert_eq!(app.help_scroll, 1);
+        app.on_key(key(KeyCode::Home));
+        assert_eq!(app.help_scroll, 0);
+        app.on_key(key(KeyCode::Esc));
+        app.on_key(key(KeyCode::Char('?')));
+        assert_eq!(app.help_scroll, 0, "reopening starts at the top again");
     }
 
     #[test]
@@ -693,5 +839,47 @@ mod tests {
             "the installed row must not be queued"
         );
         assert_eq!(app.msg, "1 install queued · 1 already installed");
+    }
+
+    #[test]
+    fn attention_filter_hides_current_rows_and_clamps_the_highlight() {
+        let mut app = App::with_apps(vec![
+            one("a", true, true, Some(0)),
+            one("b", true, true, Some(2)),
+            one("c", false, false, None),
+        ]);
+        app.on_key(key(KeyCode::Char('o')));
+        assert!(app.filter_attention);
+        assert_eq!(app.visible_rows(), vec![1, 2]);
+        assert_eq!(app.sel, 1, "highlight must move onto a visible row");
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.sel, 2);
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.sel, 2, "the highlight stops at the last visible row");
+        app.on_key(key(KeyCode::Char('o')));
+        assert!(!app.filter_attention);
+        assert_eq!(app.visible_rows(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn failed_tasks_count_as_needing_attention() {
+        let mut app = App::with_apps(vec![one("a", true, true, Some(0))]);
+        assert!(!app.needs_attention(&app.apps[0]));
+        app.failed.insert("a".into(), "cargo build failed".into());
+        assert!(app.needs_attention(&app.apps[0]));
+        app.on_key(key(KeyCode::Char('o')));
+        assert_eq!(app.visible_rows(), vec![0]);
+    }
+
+    #[test]
+    fn status_tone_follows_the_message_prefix() {
+        let mut app = App::with_apps(apps(1));
+        assert_eq!(app.status_line().1, Tone::Info);
+        app.msg = "✓ installed photocraft".into();
+        assert_eq!(app.status_line().1, Tone::Good);
+        app.msg = "✗ photocraft · installing: boom".into();
+        assert_eq!(app.status_line().1, Tone::Bad);
+        app.pending.push_back(("a".into(), Action::Update));
+        assert_eq!(app.status_line().1, Tone::Busy);
     }
 }
