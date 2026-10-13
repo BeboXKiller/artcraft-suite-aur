@@ -3,6 +3,43 @@
 Terminal UI to install, update and launch the Craft App Suite from source — clone,
 build, install and launch each app without leaving the keyboard.
 
+## Features
+
+- **The whole suite, from source** — 13 apps (PhotoCraft, WordCraft, FilmCraft,
+  Craft Launcher, …): clone from GitHub, build with cargo, install to
+  `~/.local/bin`, launch — all from one keyboard-driven list.
+- **Batch actions over picks** — `Space` / `Ctrl+Space` pick any set of rows;
+  `u` / `i` / `f` / `x` / `Enter` act on the picks (or the highlighted row when
+  nothing is picked); `U` / `a` update / install everything.
+- **Controlled parallelism** — `-p N` / `--parallel N` / `ARTCRAFT_PARALLEL`
+  cap how many apps compile at once (default 2, queue the rest as `◌`); `p`
+  opens a popup to change it live; the header shows `⚙ n/limit` while builds
+  run. Low-spec machines should stick to 1–2.
+- **Desktop integration on every build** — the binary lands in `~/.local/bin`,
+  the repo's `.desktop` entry and hicolor icons are registered in
+  `~/.local/share/applications` and `~/.local/share/icons/hicolor`, caches
+  refreshed — the app appears in your app menu immediately.
+- **Uninstall** — `d` removes the binary, the desktop entry, the icons *and*
+  the clone, behind a confirmation popup (`y` to confirm).
+- **See before you update** — the bottom pane lists the upstream commits an
+  update would pull (or the live build log while a task runs).
+- **Attention filter** — `o` hides everything that is fine (up to date); only
+  missing, behind, or failed apps remain, with the header badge saying so.
+- **Expandable app blurbs** — `→` / `←` open and close an indented one-line
+  description (the official getartcraft.com blurb) under any row.
+- **Safe by default** — cancel/dequeue with `x`, two-step quit while tasks
+  run, background builds survive quitting, `r` rescans from disk at any time.
+- **Clear feedback** — one status row for queued/running/success/error, every
+  state as glyph *and* phrase, failed rows tracked until they succeed.
+- **Full key reference in-app** — `?` opens a scrollable overlay documenting
+  every hint.
+- **Brand theme, honest colour** — ArtCraft palette (the same tokens as
+  getartcraft.com) auto-degraded through truecolor → 256 → 16 → mono
+  (`NO_COLOR`), light-terminal variant via `ARTCRAFT_THEME=light`.
+- **Plays well with scripts** — `--status` prints one line per app anywhere
+  (pipes, CI); the UI never opens without a real TTY; logs go to
+  `~/.cache/artcraft-suite-aur/`, never onto the terminal.
+
 ## Requirements
 
 | | |
@@ -35,6 +72,7 @@ cargo install --path .
 
 ```sh
 artcraft-suite-aur             # interactive UI (requires a terminal)
+artcraft-suite-aur -p 1        # one build at a time (low-spec machines)
 artcraft-suite-aur --status    # one line per app: repo|state|pkg|version|dir
 artcraft-suite-aur --version
 artcraft-suite-aur --help
@@ -46,7 +84,7 @@ full-screen UI: it prints the `--status` format and a hint on stderr, then exits
 ### Layout
 
 ```text
-┌ ArtCraft Suite ───────────────────────────────────────────── ✓ 6  ↑ 3  · 2 ┐
+┌ ArtCraft Suite ──────────────────────────────────────── ✓ 6  ↑ 3  · 2  ⚙ 2/2 ┐
 │ ArtCraft Suite — install · update · launch the Craft suite                 │
 │ ✓ 1 update ready — u updates wordcraft                                     │   ← status / errors
 └────────────────────────────────────────────────────────────────────────────┘
@@ -252,7 +290,8 @@ Source layout — concerns are kept separate on purpose:
 - **End-to-end** (`scripts/tui_smoke.py`): boots the real binary in a sized pty,
   sends real keys, replays the output through a minimal ANSI screen and checks
   alt-screen entry/exit, cursor restore, the summary counters, status phrases,
-  the details pane, picking, the attention filter and the frames themselves.
+  the details pane, picking, the attention filter, the parallel-builds popup
+  and the frames themselves.
 
 ## License
 
