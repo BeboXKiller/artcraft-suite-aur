@@ -78,6 +78,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if let Some(targets) = &app.confirm_uninstall {
         draw_confirm_uninstall(frame, area, s, app, targets);
     }
+    if app.jobs_popup {
+        draw_jobs_popup(frame, area, s, app.jobs_scratch);
+    }
 }
 
 /// Right-aligned header counters: how much is current, behind, or missing.
@@ -103,6 +106,12 @@ fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
     ];
     if app.filter_attention {
         spans.push(Span::styled(" attention ", s.fg(Tint::Accent).bold()));
+    }
+    if !app.busy.is_empty() {
+        spans.push(Span::styled(
+            format!(" ⚙ {}/{} ", app.busy.len(), app.max_parallel),
+            s.fg(Tint::Accent),
+        ));
     }
     spans
 }
@@ -400,6 +409,8 @@ fn key_bar(s: Sty) -> Vec<Line<'static>> {
             Span::raw(" install all  "),
             Span::styled("[d]", c),
             Span::raw(" uninstall  "),
+            Span::styled("[p]", c),
+            Span::raw(" builds  "),
             Span::styled("[r]", c),
             Span::raw(" rescan"),
         ]),
@@ -440,6 +451,7 @@ fn draw_help(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
         Line::from(""),
         Line::from(Span::styled("Session", h)),
         Line::from("  ?               open or close this help"),
+        Line::from("  p               how many builds run at once (1-16)"),
         Line::from("  q / Esc         quit — asks again while tasks run"),
         Line::from("  Ctrl+C          quit immediately"),
         Line::from(""),
@@ -514,6 +526,42 @@ fn draw_confirm_uninstall(frame: &mut Frame, area: Rect, s: Sty, app: &App, targ
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" Confirm uninstall ")),
+        rect,
+    );
+}
+
+/// Centered editor for the parallel-build limit (`p`): the number, the honest
+/// warning for weak machines, and how to change or leave.
+fn draw_jobs_popup(frame: &mut Frame, area: Rect, s: Sty, scratch: usize) {
+    let lines: Vec<Line> = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("  {scratch}"),
+            s.fg(Tint::Accent).bold(),
+        )),
+        Line::from(""),
+        Line::from("  apps compiling at once."),
+        Line::from(Span::styled(
+            "  Low-spec PC? Stick to 1–2.",
+            s.fg(Tint::Warn),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "  ↑↓ or +/- change · Enter applies · Esc cancels",
+            s.fg(Tint::Faint),
+        )),
+    ];
+    let w = area.width.min(50);
+    let box_h = (lines.len() as u16 + 2).min(area.height);
+    let rect = Rect::new(
+        area.x + (area.width.saturating_sub(w)) / 2,
+        area.y + (area.height.saturating_sub(box_h)) / 2,
+        w,
+        box_h,
+    );
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" Parallel builds ")),
         rect,
     );
 }
@@ -663,6 +711,10 @@ mod tests {
         assert!(
             row3.contains("[d] uninstall"),
             "uninstall hint missing: {row3:?}"
+        );
+        assert!(
+            row3.contains("[p] builds"),
+            "parallel-builds hint missing: {row3:?}"
         );
         assert!(
             row3.trim_end().ends_with("rescan"),
@@ -864,6 +916,10 @@ mod tests {
             joined.contains("uninstall: binary, menu, icons, clone"),
             "uninstall hint missing from help: {joined:?}"
         );
+        assert!(
+            joined.contains("how many builds run at once"),
+            "parallel-builds hint missing from help: {joined:?}"
+        );
     }
 
     #[test]
@@ -876,6 +932,43 @@ mod tests {
         assert!(
             !joined.contains("Navigation"),
             "scroll offset ignored: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn jobs_popup_shows_the_value_and_the_low_spec_warning() {
+        let mut a = app();
+        a.jobs_popup = true;
+        a.jobs_scratch = 5;
+        let joined = render(&a, 80, 24).join("\n");
+        assert!(joined.contains("Parallel builds"), "{joined:?}");
+        assert!(joined.contains("apps compiling at once."), "{joined:?}");
+        assert!(joined.contains("Low-spec PC? Stick to 1–2."), "{joined:?}");
+        assert!(joined.contains("Enter applies · Esc cancels"), "{joined:?}");
+        // the card is small: the key bar stays readable around it
+        assert!(
+            joined.contains("[q] quit"),
+            "popup ate the frame: {joined:?}"
+        );
+        // and it never shows without the p key
+        let b = app();
+        assert!(
+            !render(&b, 80, 24).join("\n").contains("Parallel builds"),
+            "popup leaked into a normal frame"
+        );
+    }
+
+    #[test]
+    fn header_counts_running_builds_against_the_limit() {
+        let mut a = app();
+        a.busy.insert("photocraft".into(), "installing".into());
+        a.max_parallel = 2;
+        let head = render(&a, 80, 24).join("\n");
+        assert!(head.contains("⚙ 1/2"), "no parallel badge: {head:?}");
+        let b = app();
+        assert!(
+            !render(&b, 80, 24).join("\n").contains('⚙'),
+            "idle badge leaked"
         );
     }
 

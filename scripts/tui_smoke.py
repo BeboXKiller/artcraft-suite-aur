@@ -124,7 +124,7 @@ send("\x1b[D")  # Left: collapse it again
 pump(0.4, "collapsed")
 send("?")
 pump(0.4, "help")
-send("jjjjjjjj")  # scroll the help overlay to its end
+send("jjjjjjjjjj")  # scroll the help overlay to its end (offset clamps)
 pump(0.4, "help_scrolled")
 send("\x1b")
 pump(0.4, "help_closed")
@@ -132,6 +132,10 @@ send("o")
 pump(0.4, "filter_on")
 send("o")
 pump(0.4, "filter_off")
+send("p")
+pump(0.4, "jobs_popup")
+send("\x1b")
+pump(0.4, "jobs_closed")
 send("x")
 pump(0.7, "cancel_msg")
 send("q")
@@ -165,7 +169,7 @@ checks = [
     ("header summary rendered", "✓ " in stages["startup"] and "↑ " in stages["startup"]),
     ("app list rendered", "Apps (" in stages["startup"]),
     ("version column uses available width", "artcraft-l…" not in stages["startup"]
-     and "artcraft-launcher" in stages["startup"]),
+     and "craft-launcher" in stages["startup"]),
     ("status phrases rendered", any(
         p in stages["startup"]
         for p in ("up to date", "not installed", "cloned, not built", "behind")
@@ -204,6 +208,9 @@ checks = [
     ("attention filter engages", "attention only" in stages["filter_on"]
      or "nothing needs attention" in stages["filter_on"]),
     ("attention filter clears", "attention only" not in stages["filter_off"]),
+    ("jobs popup opens with the warning", "Parallel builds" in stages["jobs_popup"]
+     and "Stick to 1–2" in stages["jobs_popup"]),
+    ("jobs popup closes on Esc", "Parallel builds" not in stages["jobs_closed"]),
     ("idle-cancel feedback rendered", "nothing to cancel" in stages["cancel_msg"]),
     ("status survives redraw", "cadcraft" in stages["cancel_msg"] or "designcraft" in stages["cancel_msg"]),
     ("exit code 0", code == 0),

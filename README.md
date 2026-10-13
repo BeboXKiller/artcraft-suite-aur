@@ -64,7 +64,7 @@ full-screen UI: it prints the `--status` format and a hint on stderr, then exits
 └────────────────────────────────────────────────────────────────────────────┘
  [Space] pick  [Ctrl+Space] pick more  [Enter] open  [u] update  [o] attention
  [j/k] move  [→] details  [←] close  [f] fetch  [x] cancel  [?] help  [q] quit
- [U] update all  [a] install all  [d] uninstall  [r] rescan
+ [U] update all  [a] install all  [d] uninstall  [p] builds  [r] rescan
 ```
 
 Every row states its situation twice — a glyph and the same fact in words
@@ -107,6 +107,7 @@ it removes the binary, the desktop entry, the icons *and* the clone in
 | `u` / `i` / `f` | update / install / fetch — the picked rows, or the highlighted row when nothing is picked |
 | `U` / `a` | update everything cloned / install everything missing |
 | `d` | uninstall the picked/highlighted apps — binary, desktop entry, icons and the clone; asks for `y`, any other key cancels |
+| `p` | popup to set how many builds run at once (1–16; low-spec machines should stick to 1–2) |
 | `o` | toggle **attention only** — hide the apps that are up to date |
 | `x` / `Delete` | cancel the running task, or dequeue a queued one — again over the picked set |
 | `r` | rescan all apps from disk (on a background thread) |
@@ -120,8 +121,10 @@ it removes the binary, the desktop entry, the icons *and* the clone in
 and `Enter` look at the picked rows first and fall back to the highlighted row
 when nothing is picked, so the picks always win. `o` narrows the list to the
 apps that need attention (missing, behind upstream, or failed) — the highlight
-follows the filter, and the header badge says when it is on. At most 2 tasks
-run at once; the rest queue up (shown as `◌` and in the status row).
+follows the filter, and the header badge says when it is on. At most `-p N`
+apps compile at once (default 2; `p` opens a popup to change it live, and the
+header shows `⚙ n/limit` while builds run) — the rest queue up (shown as `◌`
+and in the status row).
 
 ## Theme
 
@@ -152,6 +155,7 @@ UI never depends on colour alone.
 | Variable | Effect | Default |
 |---|---|---|
 | `ARTCRAFT_GIT_ORG` | GitHub org the suite is cloned from | `storytold` |
+| `ARTCRAFT_PARALLEL` | how many apps compile at once (1–16; same as `-p`; low-spec: 1–2) | `2` |
 | `XDG_CACHE_HOME` | where build logs live | `~/.cache` |
 | `HOME` | where repos are cloned, and `~/.local/bin` for installs | — |
 
@@ -240,8 +244,9 @@ Source layout — concerns are kept separate on purpose:
   (never the cursor row), `Enter` installing only the missing picks, the `o`
   attention filter (including clamping the highlight onto a visible row), failed
   tasks counting as attention, the `d` → `y` uninstall confirmation (any other
-  key cancels it; busy and not-installed rows are skipped), and status tone
-  following the message prefix.
+  key cancels it; busy and not-installed rows are skipped), the `p` parallel-builds
+  popup (apply promotes queued work; Esc keeps the old limit; clamped 1–16), and
+  status tone following the message prefix.
 - **Engine** (`src/engine.rs`): children are wired to the log file (not the tty),
   `log_tail` survives invalid UTF-8, the version probe respects its timeout.
 - **End-to-end** (`scripts/tui_smoke.py`): boots the real binary in a sized pty,

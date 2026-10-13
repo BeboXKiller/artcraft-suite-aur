@@ -10,7 +10,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::engine::{self, Action, AppInfo, Ev};
 use crate::theme::Palette;
 
-const MAX_PARALLEL: usize = 2;
+/// How many apps may compile at once unless the user says otherwise
+/// (`-p` on the CLI, `ARTCRAFT_PARALLEL`, or the `p` popup in the UI).
+pub const DEFAULT_MAX_PARALLEL: usize = 2;
+/// Smallest and largest accepted parallel-build limit.
+pub const MIN_JOBS: usize = 1;
+pub const MAX_JOBS: usize = 16;
 /// Rows a PageUp/PageDown jumps; close to a typical list viewport height.
 const PAGE: usize = 10;
 /// Bytes of build log cached for the tail pane.
@@ -51,6 +56,12 @@ pub struct App {
     confirm_quit: bool,
     /// pending `d` uninstall: target indices awaiting a `y` confirmation
     pub confirm_uninstall: Option<Vec<usize>>,
+    /// how many apps may compile at once (see [`Self::try_start`])
+    pub max_parallel: usize,
+    /// `p` popup: editing the parallel-build limit
+    pub jobs_popup: bool,
+    /// value being edited in the `p` popup
+    pub jobs_scratch: usize,
     /// Tail of the selected repo's log, refreshed by [`Self::refresh_log`].
     pub log: Vec<String>,
     log_repo: &'static str,
@@ -59,7 +70,8 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(tx: Sender<Ev>) -> Self {
+    pub fn new(tx: Sender<Ev>, max_parallel: usize) -> Self {
+        let max_parallel = max_parallel.clamp(MIN_JOBS, MAX_JOBS);
         let mut app = Self {
             apps: engine::scan(),
             sel: 0,
@@ -76,6 +88,9 @@ impl App {
             palette: Palette::detect(),
             confirm_quit: false,
             confirm_uninstall: None,
+            max_parallel,
+            jobs_popup: false,
+            jobs_scratch: max_parallel,
             log: Vec::new(),
             log_repo: "",
             log_len: 0,
@@ -170,7 +185,7 @@ impl App {
         if self.busy.contains_key(&repo) || self.pending.iter().any(|(r, _)| *r == repo) {
             return;
         }
-        if self.busy.len() >= MAX_PARALLEL {
+        if self.busy.len() >= self.max_parallel {
             self.pending.push_back((repo, action));
             return;
         }
@@ -181,7 +196,7 @@ impl App {
 
     fn pump(&mut self) {
         while let Some((repo, action)) = self.pending.pop_front() {
-            if self.busy.contains_key(&repo) || self.busy.len() >= MAX_PARALLEL {
+            if self.busy.contains_key(&repo) || self.busy.len() >= self.max_parallel {
                 self.pending.push_front((repo, action));
                 break;
             }
@@ -254,6 +269,23 @@ impl App {
             }
             return;
         }
+        // The parallel-builds popup: adjust the scratch value, apply or cancel.
+        // Not destructive, so other keys are simply ignored.
+        if self.jobs_popup {
+            match key.code {
+                Up | Char('+') => self.jobs_scratch = (self.jobs_scratch + 1).min(MAX_JOBS),
+                Down | Char('-') => {
+                    self.jobs_scratch = self.jobs_scratch.saturating_sub(1).max(MIN_JOBS)
+                }
+                Enter => self.jobs_apply(),
+                Esc => {
+                    self.jobs_popup = false;
+                    self.msg = "parallel builds unchanged".into();
+                }
+                _ => {}
+            }
+            return;
+        }
         // A pending uninstall wants a plain `y`; anything else changes its mind.
         if self.confirm_uninstall.is_some() && key.code != Char('y') {
             self.confirm_uninstall = None;
@@ -289,6 +321,10 @@ impl App {
             Char('f') => self.start_action(Action::Fetch),
             Char('x') | Delete => self.cancel_selected(),
             Char('d') => self.uninstall_selected(),
+            Char('p') => {
+                self.jobs_popup = true;
+                self.jobs_scratch = self.max_parallel;
+            }
             Char('y') => {
                 if let Some(targets) = self.confirm_uninstall.take() {
                     self.run_uninstall(targets);
@@ -507,6 +543,15 @@ impl App {
         };
     }
 
+    /// `Enter` in the `p` popup: adopt the new limit and start any queued
+    /// work the raised cap now allows.
+    fn jobs_apply(&mut self) {
+        self.max_parallel = self.jobs_scratch.clamp(MIN_JOBS, MAX_JOBS);
+        self.jobs_popup = false;
+        self.msg = format!("parallel builds: {}", self.max_parallel);
+        self.pump();
+    }
+
     /// `d`: offer to uninstall the picked (or highlighted) rows — binary,
     /// desktop entry, icons and the clone. `y` confirms; any other key cancels.
     fn uninstall_selected(&mut self) {
@@ -715,6 +760,9 @@ impl App {
             palette: Palette::of(crate::theme::Depth::TrueColor),
             confirm_quit: false,
             confirm_uninstall: None,
+            max_parallel: DEFAULT_MAX_PARALLEL,
+            jobs_popup: false,
+            jobs_scratch: DEFAULT_MAX_PARALLEL,
             log: Vec::new(),
             log_repo: "",
             log_len: 0,
@@ -881,11 +929,12 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::CONTROL)
     }
 
-    /// Fill both runner slots so no key press can spawn real work.
+    /// Fill every runner slot so no key press can spawn real work.
     fn saturate(app: &mut App) {
-        app.busy.insert("z1".into(), "installing".into());
-        app.busy.insert("z2".into(), "installing".into());
-        assert_eq!(app.busy.len(), MAX_PARALLEL);
+        for i in 0..app.max_parallel {
+            app.busy.insert(format!("z{i}"), "installing".into());
+        }
+        assert_eq!(app.busy.len(), app.max_parallel);
     }
 
     #[test]
@@ -1026,6 +1075,63 @@ mod tests {
         );
         assert_eq!(app.msg, "nothing to uninstall (1 skipped)");
         assert_eq!(app.busy["a"], "updating", "busy row must stay untouched");
+    }
+
+    #[test]
+    fn p_opens_the_jobs_popup_and_enter_applies() {
+        let mut app = App::with_apps(apps(3));
+        app.on_key(key(KeyCode::Char('p')));
+        assert!(app.jobs_popup, "p must open the popup");
+        assert_eq!(
+            app.jobs_scratch, app.max_parallel,
+            "scratch starts at the current limit"
+        );
+        app.on_key(key(KeyCode::Up));
+        app.on_key(key(KeyCode::Char('+')));
+        assert_eq!(app.jobs_scratch, app.max_parallel + 2);
+        app.on_key(key(KeyCode::Enter));
+        assert!(!app.jobs_popup, "Enter must close the popup");
+        assert_eq!(app.max_parallel, 4);
+        assert_eq!(app.msg, "parallel builds: 4");
+    }
+
+    #[test]
+    fn raising_the_limit_promotes_queued_work_immediately() {
+        let mut app = App::with_apps(apps(3));
+        saturate(&mut app);
+        app.pending.push_back(("c".into(), Action::Install));
+        app.on_key(key(KeyCode::Char('p')));
+        app.on_key(key(KeyCode::Up)); // 3
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.busy.len(), 3, "the queued task must start at once");
+        assert!(app.pending.is_empty(), "the queue must be drained");
+    }
+
+    #[test]
+    fn the_jobs_popup_clamps_and_esc_cancels() {
+        let mut app = App::with_apps(apps(1));
+        app.on_key(key(KeyCode::Char('p')));
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.jobs_scratch, MIN_JOBS, "clamped at the floor");
+        app.on_key(key(KeyCode::Down));
+        assert_eq!(app.jobs_scratch, MIN_JOBS);
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(
+            app.sel, 0,
+            "other keys must not act while the popup is open"
+        );
+        app.on_key(key(KeyCode::Esc));
+        assert!(!app.jobs_popup);
+        assert_eq!(
+            app.max_parallel, DEFAULT_MAX_PARALLEL,
+            "Esc keeps the old limit"
+        );
+        assert_eq!(app.msg, "parallel builds unchanged");
+        app.on_key(key(KeyCode::Char('p')));
+        for _ in 0..20 {
+            app.on_key(key(KeyCode::Up));
+        }
+        assert_eq!(app.jobs_scratch, MAX_JOBS, "clamped at the ceiling");
     }
 
     #[test]
