@@ -1,5 +1,12 @@
 /target
 
+# AUR build artifacts
+aur/src/
+aur/pkg/
+aur/*.pkg.tar.*
+aur/*.log
+aur/*.sig
+
 # editor / OS noise
 *.swp
 *.swo

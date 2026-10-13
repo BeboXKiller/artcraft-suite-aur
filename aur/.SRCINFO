@@ -1,0 +1,14 @@
+pkgbase = artcraft-suite-aur
+	pkgdesc = Terminal UI to install, update and launch the Craft App Suite from source
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/BeboXKiller/artcraft-suite-aur
+	arch = x86_64
+	license = MIT OR Apache-2.0
+	makedepends = cargo
+	depends = glibc
+	depends = gcc-libs
+	source = artcraft-suite-aur-0.1.0.tar.gz::https://github.com/BeboXKiller/artcraft-suite-aur/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = 5d8e4595714af78e4a671d149dd883c0fc5964d362828691ba70225f4109ee29
+
+pkgname = artcraft-suite-aur

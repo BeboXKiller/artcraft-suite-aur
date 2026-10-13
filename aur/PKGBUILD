@@ -9,7 +9,7 @@ license=('MIT OR Apache-2.0')
 depends=('glibc' 'gcc-libs')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')  # run `updpkgsums` after tagging to fill this in
+sha256sums=('5d8e4595714af78e4a671d149dd883c0fc5964d362828691ba70225f4109ee29')
 
 prepare() {
   cd "$pkgname-$pkgver"
