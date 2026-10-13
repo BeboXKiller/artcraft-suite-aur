@@ -1,1 +1,7 @@
 /target
+
+# editor / OS noise
+*.swp
+*.swo
+*~
+.DS_Store
