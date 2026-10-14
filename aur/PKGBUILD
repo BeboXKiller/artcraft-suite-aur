@@ -1,6 +1,6 @@
 # Maintainer: Ibrahim Saleh <himagad408@gmail.com>
 pkgname=artcraft-suite-aur
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Terminal UI to install, update and launch the Craft App Suite from source"
 arch=('x86_64')
@@ -9,7 +9,7 @@ license=('MIT OR Apache-2.0')
 depends=('glibc' 'gcc-libs')
 makedepends=('cargo')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('5d8e4595714af78e4a671d149dd883c0fc5964d362828691ba70225f4109ee29')
+sha256sums=('b22c78dfe46f768a532d099cfebc7b76f1764340c02b24564399f9cbf65b9f2e')
 
 prepare() {
   cd "$pkgname-$pkgver"
