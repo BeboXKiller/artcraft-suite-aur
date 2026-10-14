@@ -33,7 +33,10 @@ build, install and launch each app without leaving the keyboard.
 - **Desktop integration on every build** — the binary lands in `~/.local/bin`,
   the repo's `.desktop` entry and hicolor icons are registered in
   `~/.local/share/applications` and `~/.local/share/icons/hicolor`, caches
-  refreshed — the app appears in your app menu immediately.
+  refreshed — the app appears in your app menu immediately. A desktop
+  notification (via `notify-send`) also fires when an install or update
+  finishes — success, failure or "up to date" — so you can walk away from a
+  long build; `ARTCRAFT_NOTIFY=never` silences it.
 - **Uninstall** — `d` removes the binary, the desktop entry, the icons *and*
   the clone, behind a confirmation popup (`y` to confirm).
 - **See before you update** — the bottom pane lists the upstream commits an
@@ -220,6 +223,7 @@ reverse video still carry every state. Each state is also a glyph and a phrase
 | `ARTCRAFT_REPO_ROOTS` | extra directories searched for suite clones (colon-separated; `$HOME` is always searched) | — |
 | `ARTCRAFT_PARALLEL` | how many apps compile at once (1–16; same as `-p`; low-spec: 1–2) | `2` |
 | `ARTCRAFT_FETCH` | `never` (or `0`/`no`/`off`) = skip the automatic upstream check on launch and `r`; `f` / `u` still fetch | check on |
+| `ARTCRAFT_NOTIFY` | `never` (or `0`/`no`/`off`) = suppress the desktop notification raised when an install or update finishes (needs `notify-send`) | notify on |
 | `XDG_CACHE_HOME` | where build logs live | `~/.cache` |
 | `HOME` | where repos are cloned, and `~/.local/bin` for installs | — |
 

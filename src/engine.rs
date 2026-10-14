@@ -772,6 +772,44 @@ pub fn fetch_enabled() -> bool {
     }
 }
 
+/// Whether install/update completions raise a desktop notification.
+/// `ARTCRAFT_NOTIFY=never` (or `0`/`no`/`off`) silences them.
+pub fn notify_enabled() -> bool {
+    notify_enabled_from(std::env::var("ARTCRAFT_NOTIFY").ok().as_deref())
+}
+
+/// The parsing half of [`notify_enabled`], split out so it's testable without
+/// mutating the process environment (which would race under parallel tests).
+fn notify_enabled_from(raw: Option<&str>) -> bool {
+    match raw {
+        Some(v) => !matches!(
+            v.to_ascii_lowercase().as_str(),
+            "never" | "0" | "no" | "off"
+        ),
+        None => true,
+    }
+}
+
+/// Raise a desktop notification via `notify-send` (libnotify → D-Bus).
+///
+/// Fire-and-forget on the caller's (already background) thread: the child is
+/// spawned and dropped without waiting, so a slow or hung session bus can never
+/// delay the completion path or the UI. A missing `notify-send` or absent
+/// session bus is a silent no-op — the in-app status row already tells the same
+/// story, so a failed notification is never an error.
+fn notify(title: &str, body: &str) {
+    if !notify_enabled() {
+        return;
+    }
+    let _ = Command::new("notify-send")
+        .args(["-a", "ArtCraft Suite", title, body])
+        .env("PATH", child_env_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
 /// Serializes every git ref mutation (background fetch, `f`, `u`) so the
 /// housekeeping check can never race a user action on the same repo's locks.
 fn git_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -1255,6 +1293,16 @@ pub fn run_action(
 pub fn spawn(repo: String, dir: PathBuf, action: Action, tx: Sender<Ev>) {
     std::thread::spawn(move || {
         let result = run_action(&repo, &dir, action, &tx);
+        // Desktop notification for the outcomes the user walked away from:
+        // success, failure and the "up to date" no-op all count. Fetch is
+        // quick and user-triggered, so it stays quiet.
+        if matches!(action, Action::Install | Action::Update) {
+            let body = match &result {
+                Ok(m) => m.clone(),
+                Err(e) => format!("{repo} · {}: {e}", action.label()),
+            };
+            notify(&repo, &body);
+        }
         let _ = tx.send(Ev::Done {
             repo,
             action,
@@ -1396,6 +1444,23 @@ mod tests {
         let repo = "engine-test-units-unknown";
         let _ = std::fs::remove_file(units_file(repo));
         assert_eq!(estimate_units(Path::new("/nonexistent"), repo, "pkg"), 0);
+    }
+
+    #[test]
+    fn notify_opt_out_parses_the_documented_values() {
+        // On by default; the documented opt-out words (and a stray case) silence
+        // it; anything else keeps it on. Split from notify_enabled() so the test
+        // never mutates the process env.
+        assert!(notify_enabled_from(None), "unset must mean on");
+        for off in ["never", "0", "no", "off", "NEVER", "Off"] {
+            assert!(
+                !notify_enabled_from(Some(off)),
+                "'{off}' must silence notifications"
+            );
+        }
+        for on in ["always", "yes", "1", ""] {
+            assert!(notify_enabled_from(Some(on)), "'{on}' must stay on");
+        }
     }
 
     fn cleanup(path: &Path) {
