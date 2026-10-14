@@ -93,17 +93,32 @@ fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
         .iter()
         .filter(|a| a.behind.is_some_and(|n| n > 0))
         .count();
-    let missing = app.apps.iter().filter(|a| !a.cloned).count();
+    // nothing present at all: no clone *and* no installed binary — an app
+    // that is installed without its source is not "missing"
+    let missing = app
+        .apps
+        .iter()
+        .filter(|a| !a.cloned && !a.installed)
+        .count();
     let up = app
         .apps
         .iter()
-        .filter(|a| a.installed && !a.behind.is_some_and(|n| n > 0))
+        .filter(|a| a.installed && (a.behind == Some(0) || !a.cloned))
+        .count();
+    // clones whose upstream check hasn't landed — unknown, not "current"
+    let unchecked = app
+        .apps
+        .iter()
+        .filter(|a| a.cloned && a.behind.is_none())
         .count();
     let mut spans = vec![
         Span::styled(format!(" ✓ {up} "), s.fg(Tint::Good)),
         Span::styled(format!(" ↑ {behind} "), s.fg(Tint::Warn)),
         Span::styled(format!(" · {missing} "), s.fg(Tint::Faint)),
     ];
+    if unchecked > 0 {
+        spans.push(Span::styled(format!(" ? {unchecked} "), s.fg(Tint::Muted)));
+    }
     if app.filter_attention {
         spans.push(Span::styled(" attention ", s.fg(Tint::Accent).bold()));
     }
@@ -217,13 +232,21 @@ fn row_state(app: &App, a: &AppInfo) -> (String, String, Tint) {
         return ("✗".into(), "build failed".into(), Tint::Bad);
     }
     if a.installed {
+        if !a.cloned {
+            // installed by the launcher/an AUR package, no source on disk:
+            // there is nothing to compare against, so don't claim "up to date"
+            return ("✓".into(), "installed".into(), Tint::Good);
+        }
         match a.behind {
             Some(n) if n > 0 => (
                 behind_glyph(n),
                 format!("{n} {} behind", commit_word(n)),
                 Tint::Warn,
             ),
-            _ => ("✓".into(), "up to date".into(), Tint::Good),
+            Some(_) => ("✓".into(), "up to date".into(), Tint::Good),
+            // cloned, but the upstream check hasn't landed (offline or no
+            // upstream) — say so instead of trusting stale refs
+            None => ("?".into(), "not checked".into(), Tint::Muted),
         }
     } else if a.cloned {
         ("○".into(), "cloned, not built".into(), Tint::Muted)
@@ -285,7 +308,7 @@ fn details_for<'a>(app: &App, a: &AppInfo, s: Sty, width: usize) -> (String, Vec
         )));
         return (title, lines);
     }
-    match a.behind {
+    let (title, mut lines) = match a.behind {
         Some(n) if n > 0 => {
             let title = format!(" What's new in {repo} ");
             let version = a.version.as_deref().unwrap_or("no version");
@@ -317,6 +340,38 @@ fn details_for<'a>(app: &App, a: &AppInfo, s: Sty, width: usize) -> (String, Vec
             )));
             (title, lines)
         }
+        _ if a.installed && !a.cloned => {
+            let version = a.version.as_deref().unwrap_or("no version");
+            (
+                format!(" {repo} — installed, no clone "),
+                vec![
+                    Line::from(Span::styled(
+                        format!(" {version} · binary found, source not here"),
+                        s.fg(Tint::Good),
+                    )),
+                    Line::from(Span::styled(
+                        " Enter launches · i clones and builds it",
+                        s.fg(Tint::Faint),
+                    )),
+                ],
+            )
+        }
+        _ if a.installed && a.behind.is_none() => {
+            let version = a.version.as_deref().unwrap_or("no version");
+            (
+                format!(" {repo} — not checked "),
+                vec![
+                    Line::from(Span::styled(
+                        format!(" {version} · upstream not checked"),
+                        s.fg(Tint::Muted),
+                    )),
+                    Line::from(Span::styled(
+                        " f fetches · u updates · Enter launches",
+                        s.fg(Tint::Faint),
+                    )),
+                ],
+            )
+        }
         _ if a.installed => {
             let version = a.version.as_deref().unwrap_or("no version");
             (
@@ -347,7 +402,32 @@ fn details_for<'a>(app: &App, a: &AppInfo, s: Sty, width: usize) -> (String, Vec
                 s.fg(Tint::Faint),
             ))],
         ),
+    };
+    // Footer: where the clone lives (auto-discovered paths differ from
+    // `~/<repo>`) and whether a desktop entry is registered — the two facts a
+    // bare row can't show.
+    let menu = if a.menu {
+        "in app menu"
+    } else {
+        "no menu entry"
+    };
+    let room = width.saturating_sub(menu.len() + 4);
+    lines.push(Line::from(Span::styled(
+        format!(" {} · {}", clip(&short_dir(&a.dir), room), menu),
+        s.fg(Tint::Faint),
+    )));
+    (title, lines)
+}
+
+/// The clone path with `$HOME` shortened to `~`, for the details footer.
+fn short_dir(dir: &std::path::Path) -> String {
+    let home = crate::engine::home_dir();
+    if let Ok(rest) = dir.strip_prefix(&home)
+        && !rest.as_os_str().is_empty()
+    {
+        return format!("~/{}", rest.display());
     }
+    dir.display().to_string()
 }
 
 fn tail_lines<'a>(
@@ -447,7 +527,7 @@ fn draw_help(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
         Line::from("  d               uninstall: binary, menu, icons, clone"),
         Line::from("                   y confirms, any other key cancels"),
         Line::from("  x or Delete     cancel a task, or unqueue a queued one"),
-        Line::from("  r               rescan every app from disk"),
+        Line::from("  r               rescan: clone locations, menu, git state"),
         Line::from(""),
         Line::from(Span::styled("Session", h)),
         Line::from("  ?               open or close this help"),
@@ -458,6 +538,7 @@ fn draw_help(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
         Line::from(Span::styled("Reading a row", h)),
         Line::from("  ✓ up to date    ↑n behind   ◐ updating…   ◌ queued"),
         Line::from("  ✗ build failed  ○ cloned, not built   · missing"),
+        Line::from("  ? not checked   f fetches · u updates"),
         Line::from("                   colour tier auto · NO_COLOR=1 = mono"),
     ];
     // full-width modal so nothing bleeds around it; capped to the screen so it
@@ -610,6 +691,7 @@ mod tests {
             version: Some("0.5.0 (dev build) with a very long suffix".into()),
             behind: Some(0),
             commits: Vec::new(),
+            menu: true,
         }])
     }
 
@@ -623,6 +705,7 @@ mod tests {
             version: None,
             behind,
             commits: Vec::new(),
+            menu: false,
         }
     }
 
@@ -734,6 +817,51 @@ mod tests {
     }
 
     #[test]
+    fn unchecked_rows_admit_it_and_the_header_counts_them() {
+        let mut a = app(); // photocraft: checked, up to date
+        a.apps.push(app_info("wordcraft", true, true, None));
+        let rows = render(&a, 80, 24);
+        let row = rows
+            .iter()
+            .find(|r| r.contains("wordcraft"))
+            .expect("row present");
+        assert!(row.contains('?'), "no unchecked glyph: {row:?}");
+        assert!(row.contains("not checked"), "no unchecked phrase: {row:?}");
+        assert!(
+            !row.contains("up to date"),
+            "stale refs must never read as currency: {row:?}"
+        );
+        let head = &rows[0];
+        assert!(
+            head.contains("✓ 1"),
+            "checked row still counts up: {head:?}"
+        );
+        assert!(head.contains("? 1"), "unchecked count missing: {head:?}");
+
+        // the details pane admits it too, and points at the way to fix it
+        a.sel = 1;
+        let joined = render(&a, 80, 24).join("\n");
+        assert!(joined.contains("wordcraft — not checked"), "{joined:?}");
+        assert!(joined.contains("upstream not checked"), "{joined:?}");
+        assert!(joined.contains("f fetches · u updates"), "{joined:?}");
+    }
+
+    #[test]
+    fn the_attention_filter_keeps_unchecked_clones() {
+        let mut a = app(); // photocraft: checked, up to date
+        a.apps.push(app_info("wordcraft", true, true, None));
+        assert!(
+            a.needs_attention(&a.apps[1]),
+            "an unchecked clone still needs checking"
+        );
+        a.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('o'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(a.visible_rows(), vec![1], "only the unchecked clone stays");
+    }
+
+    #[test]
     fn behind_rows_say_so_in_words() {
         let mut a = app();
         a.apps.push(app_info("wordcraft", true, true, Some(3)));
@@ -775,6 +903,39 @@ mod tests {
         let joined = rows.join("\n");
         assert!(joined.contains("installing — photocraft"), "{joined:?}");
         assert!(joined.contains("Compiling photocraft"), "{joined:?}");
+    }
+
+    #[test]
+    fn details_footer_reports_where_the_clone_lives_and_the_menu_state() {
+        // the fixture is menu-registered but lives outside $HOME
+        let rows = render(&app(), 100, 30);
+        let joined = rows.join("\n");
+        assert!(joined.contains("in app menu"), "{joined:?}");
+        assert!(
+            joined.contains("/nonexistent"),
+            "a discovered clone path must be visible: {joined:?}"
+        );
+
+        let a = App::with_apps(vec![app_info("cadcraft", false, false, None)]);
+        let rows = render(&a, 100, 30);
+        assert!(
+            rows.iter().any(|r| r.contains("no menu entry")),
+            "a missing menu entry must be stated: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn an_app_installed_without_its_clone_never_claims_up_to_date() {
+        // launcher/AUR install: binary and menu entry, but no source on disk
+        let a = App::with_apps(vec![app_info("photocraft", false, true, None)]);
+        let rows = render(&a, 80, 24);
+        let joined = rows.join("\n");
+        assert!(joined.contains("installed"), "{joined:?}");
+        assert!(
+            !joined.contains("up to date"),
+            "without a clone there is nothing to compare against: {joined:?}"
+        );
+        assert!(joined.contains("installed, no clone"), "{joined:?}");
     }
 
     #[test]

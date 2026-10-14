@@ -103,7 +103,30 @@ def marked_line(frame):
     return ""
 
 
-pump(1.5, "startup")
+def pump_until(pred, timeout, stage=None):
+    """Pump until `pred(screen text)` holds or `timeout` passes — the first
+    frame is instant, but "ready" only lands after the background upstream
+    check finishes (a bounded git fetch per clone)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        pump(0.1)
+        if pred(screen.text()):
+            break
+    if stage:
+        stages[stage] = screen.text()
+
+
+def settled_ready(t):
+    """`ready` must survive a short settle — the status line is the last thing
+    the pipeline paints, and a repaint that redraws it means the app is live."""
+    if "ready" not in t or "Apps (" not in t:
+        return False
+    before = screen.text()
+    pump(0.25)
+    return "ready" in screen.text() and screen.text() == before
+
+
+pump_until(settled_ready, 20.0, "startup")
 send("jjj")
 pump(0.4, "nav")
 send("\x1b[B")  # real Down arrow, not just 'j'
@@ -172,11 +195,12 @@ checks = [
      and "craft-launcher" in stages["startup"]),
     ("status phrases rendered", any(
         p in stages["startup"]
-        for p in ("up to date", "not installed", "cloned, not built", "behind")
+        for p in ("up to date", "not installed", "cloned, not built", "behind", "not checked")
     )),
     ("details pane rendered", any(
         p in stages["startup"]
-        for p in ("What's new in", "up to date", "not installed", "cloned, not built")
+        for p in ("What's new in", "up to date", "not installed", "cloned, not built",
+                  "not checked")
     )),
     ("key bar row 1", "[Space] pick" in stages["startup"]
      and "[Ctrl+Space] pick more" in stages["startup"] and "[o] attention" in stages["startup"]),

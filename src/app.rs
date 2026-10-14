@@ -66,6 +66,8 @@ pub struct App {
     pub log: Vec<String>,
     log_repo: &'static str,
     log_len: u64,
+    /// true until the first background scan delivers its rows
+    scanning: bool,
     tx: Sender<Ev>,
 }
 
@@ -73,7 +75,7 @@ impl App {
     pub fn new(tx: Sender<Ev>, max_parallel: usize) -> Self {
         let max_parallel = max_parallel.clamp(MIN_JOBS, MAX_JOBS);
         let mut app = Self {
-            apps: engine::scan(),
+            apps: Vec::new(),
             sel: 0,
             picks: HashSet::new(),
             busy: HashMap::new(),
@@ -81,7 +83,7 @@ impl App {
             failed: HashMap::new(),
             filter_attention: false,
             expanded: HashSet::new(),
-            msg: "ready".into(),
+            msg: "scanning…".into(),
             quit: false,
             show_help: false,
             help_scroll: 0,
@@ -94,8 +96,13 @@ impl App {
             log: Vec::new(),
             log_repo: "",
             log_len: 0,
+            scanning: true,
             tx,
         };
+        // the UI opens immediately; rows arrive with Ev::Loaded and the git
+        // state settles in with Ev::Checked (see scan_pipeline)
+        let tx = app.tx.clone();
+        std::thread::spawn(move || scan_pipeline(tx));
         app.refresh_log();
         app
     }
@@ -133,7 +140,25 @@ impl App {
                         *slot = info;
                     }
                 }
-                Ev::Refreshed => self.msg = "refreshed".into(),
+                Ev::Loaded(apps) => {
+                    self.apps = apps;
+                    self.clamp_selection();
+                    // rows are local-only now; the status line admits how long
+                    // until Checked delivers real git state
+                    let clones = self.apps.iter().filter(|a| a.cloned).count();
+                    if clones > 0 && engine::fetch_enabled() {
+                        let word = if clones == 1 { "repo" } else { "repos" };
+                        self.msg = format!("checking {clones} {word} for updates…");
+                    }
+                }
+                Ev::Checked => {
+                    self.msg = if self.scanning {
+                        self.scanning = false;
+                        "ready".into()
+                    } else {
+                        "refreshed".into()
+                    };
+                }
             }
         }
         // a rescan can take the highlighted row out of the attention filter
@@ -190,8 +215,21 @@ impl App {
             return;
         }
         self.failed.remove(&repo);
+        self.start_now(repo, action);
+    }
+
+    /// Spawn `action` against `repo`'s discovered clone location.
+    fn start_now(&mut self, repo: String, action: Action) {
+        let Some(dir) = self
+            .apps
+            .iter()
+            .find(|a| a.repo == repo)
+            .map(|a| a.dir.clone())
+        else {
+            return;
+        };
         self.busy.insert(repo.clone(), action.label().into());
-        engine::spawn(repo, action, self.tx.clone());
+        engine::spawn(repo, dir, action, self.tx.clone());
     }
 
     fn pump(&mut self) {
@@ -201,8 +239,7 @@ impl App {
                 break;
             }
             self.failed.remove(&repo);
-            self.busy.insert(repo.clone(), action.label().into());
-            engine::spawn(repo, action, self.tx.clone());
+            self.start_now(repo, action);
         }
     }
 
@@ -219,20 +256,11 @@ impl App {
         });
     }
 
-    /// Re-read every entry from disk on one worker thread, reporting progressively.
+    /// Re-read every entry from disk on one worker thread — a full rescan,
+    /// discovery of the clone locations and the upstream check included (`r`).
     fn rescan_all(&self) {
-        let mut infos = self.apps.clone();
         let tx = self.tx.clone();
-        std::thread::spawn(move || {
-            for (index, info) in infos.iter_mut().enumerate() {
-                engine::rescan_one(info);
-                let _ = tx.send(Ev::Scanned {
-                    index,
-                    info: info.clone(),
-                });
-            }
-            let _ = tx.send(Ev::Refreshed);
-        });
+        std::thread::spawn(move || scan_pipeline(tx));
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -399,9 +427,12 @@ impl App {
             .collect()
     }
 
-    /// Missing, behind upstream, or failed — the rows `o` keeps.
+    /// Missing, behind upstream, unchecked, or failed — the rows `o` keeps.
     pub fn needs_attention(&self, a: &AppInfo) -> bool {
-        !a.installed || a.behind.is_some_and(|n| n > 0) || self.failed.contains_key(a.repo)
+        !a.installed
+            || self.failed.contains_key(a.repo)
+            || a.behind.is_some_and(|n| n > 0)
+            || (a.cloned && a.behind.is_none())
     }
 
     /// Step the highlight by `step` rows *within what is visible*.
@@ -593,11 +624,12 @@ impl App {
                 continue;
             };
             let repo = a.repo.to_string();
+            let dir = a.dir.clone();
             if self.is_staged(&repo) || !a.installed {
                 skipped += 1;
                 continue;
             }
-            match engine::uninstall(&repo) {
+            match engine::uninstall(&repo, &dir) {
                 Ok(msg) => {
                     removed += 1;
                     last_msg = msg;
@@ -736,6 +768,36 @@ impl App {
     }
 }
 
+/// The background scan: local rows first so the table fills instantly, then a
+/// bounded fetch per clone so "up to date" is measured against the remote —
+/// the cached refs a plain scan sees are only refreshed by fetch (or pull),
+/// and happily report "up to date" a day after new commits land.
+///
+/// A failed fetch (offline, timeout) leaves that row honestly "not checked"
+/// instead of trusting the stale refs. Always ends with [`Ev::Checked`], even
+/// when the check is disabled or there is nothing to fetch.
+fn scan_pipeline(tx: Sender<Ev>) {
+    let apps = engine::scan();
+    let seeds: Vec<(usize, AppInfo)> = apps
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.cloned)
+        .map(|(i, a)| (i, a.clone()))
+        .collect();
+    let _ = tx.send(Ev::Loaded(apps));
+    if engine::fetch_enabled() {
+        for (index, mut info) in seeds {
+            if engine::git_fetch_bounded(&info.dir).is_ok() {
+                engine::rescan_one(&mut info);
+            } else {
+                engine::rescan_local(&mut info);
+            }
+            let _ = tx.send(Ev::Scanned { index, info });
+        }
+    }
+    let _ = tx.send(Ev::Checked);
+}
+
 #[cfg(test)]
 impl App {
     /// Build an app over a synthetic suite, without touching the real filesystem.
@@ -766,6 +828,7 @@ impl App {
             log: Vec::new(),
             log_repo: "",
             log_len: 0,
+            scanning: false,
             tx,
         }
     }
@@ -787,6 +850,7 @@ mod tests {
                 version: None,
                 behind: None,
                 commits: Vec::new(),
+                menu: false,
             })
             .collect()
     }
@@ -802,6 +866,7 @@ mod tests {
             version: None,
             behind,
             commits: Vec::new(),
+            menu: false,
         }
     }
 
@@ -1174,5 +1239,56 @@ mod tests {
         assert_eq!(app.status_line().1, Tone::Bad);
         app.pending.push_back(("a".into(), Action::Update));
         assert_eq!(app.status_line().1, Tone::Busy);
+    }
+
+    #[test]
+    fn loaded_rows_replace_the_list_and_clamp_the_highlight() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::with_apps(apps(3));
+        app.on_key(key(KeyCode::End));
+        assert_eq!(app.sel, 2);
+
+        // the background scan finishing: fewer rows than before the highlight
+        tx.send(Ev::Loaded(apps(1))).expect("send");
+        app.drain(&rx);
+        assert_eq!(app.apps.len(), 1, "the delivered rows replace the old ones");
+        assert_eq!(app.sel, 0, "the highlight is clamped onto the new rows");
+        // rows alone don't finish a rescan — the upstream check does
+        tx.send(Ev::Checked).expect("send");
+        app.drain(&rx);
+        assert_eq!(app.msg, "refreshed");
+    }
+
+    #[test]
+    fn clones_announce_the_upstream_check_until_checked_arrives() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::with_apps(apps(1));
+        app.scanning = true;
+        app.msg = "scanning…".into();
+        let mut cloned = apps(1);
+        cloned[0].cloned = true;
+        tx.send(Ev::Loaded(cloned)).expect("send");
+        app.drain(&rx);
+        assert_eq!(app.msg, "checking 1 repo for updates…");
+        assert!(app.scanning, "the scan isn't done until Checked");
+        tx.send(Ev::Checked).expect("send");
+        app.drain(&rx);
+        assert_eq!(app.msg, "ready");
+        assert!(!app.scanning);
+    }
+
+    #[test]
+    fn a_scan_with_nothing_to_fetch_settles_on_checked_alone() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::with_apps(apps(1));
+        app.scanning = true;
+        app.msg = "scanning…".into();
+        // no cloned rows: Loaded must not promise a check that isn't coming
+        tx.send(Ev::Loaded(apps(1))).expect("send");
+        app.drain(&rx);
+        assert_eq!(app.msg, "scanning…");
+        tx.send(Ev::Checked).expect("send");
+        app.drain(&rx);
+        assert_eq!(app.msg, "ready");
     }
 }

@@ -8,6 +8,21 @@ build, install and launch each app without leaving the keyboard.
 - **The whole suite, from source** — 13 apps (PhotoCraft, WordCraft, FilmCraft,
   Craft Launcher, …): clone from GitHub, build with cargo, install to
   `~/.local/bin`, launch — all from one keyboard-driven list.
+- **Auto-detection on launch** — the first frame appears immediately (the scan
+  runs in the background) and the suite finds itself: clones are located up to
+  three levels deep under `$HOME` or any `ARTCRAFT_REPO_ROOTS` directory (by
+  name *or* by their git remote, so renamed clones and forks count),
+  `.desktop` menu entries are parsed wherever they live (`~/.local/share` or
+  the system data dirs), and installed binaries are recognised in
+  `~/.local/bin`, `~/.cargo/bin`, `/usr/local/bin` and `/usr/bin` — so apps
+  installed by the launcher or an AUR package show up as installed, with their
+  real version. Every clone is then checked against its remote (a bounded
+  background `git fetch`, `ARTCRAFT_FETCH=never` opts out) so "up to date"
+  means the remote says so — not the cached refs, which only a fetch refreshes.
+  Until a clone is checked (or if the fetch fails, e.g. offline) its row says
+  `? not checked` instead of guessing. The details pane states where each clone
+  lives and whether it is registered in the app menu; `r` re-runs discovery and
+  the check at any time.
 - **Batch actions over picks** — `Space` / `Ctrl+Space` pick any set of rows;
   `u` / `i` / `f` / `x` / `Enter` act on the picks (or the highlighted row when
   nothing is picked); `U` / `a` update / install everything.
@@ -24,7 +39,8 @@ build, install and launch each app without leaving the keyboard.
 - **See before you update** — the bottom pane lists the upstream commits an
   update would pull (or the live build log while a task runs).
 - **Attention filter** — `o` hides everything that is fine (up to date); only
-  missing, behind, or failed apps remain, with the header badge saying so.
+  missing, behind, not-checked, or failed apps remain, with the header badge
+  saying so.
 - **Expandable app blurbs** — `→` / `←` open and close an indented one-line
   description (the official getartcraft.com blurb) under any row.
 - **Safe by default** — cancel/dequeue with `x`, two-step quit while tasks
@@ -106,20 +122,20 @@ full-screen UI: it prints the `--status` format and a hint on stderr, then exits
 ```
 
 Every row states its situation twice — a glyph and the same fact in words
-(`✓ up to date`, `↑3 3 commits behind`, `◐ updating…`, `✗ build failed`) — so
-nothing depends on colour alone. A picked row fills its square (`■`) in brand
-blue, and the highlighted row turns every character to dark brand ink on the
-accent bar — focus reads as contrast, not colour. `→` opens an indented
-one-line description of the highlighted app (the official getartcraft.com
-blurb); `←` closes it, and several apps can stay open while you move around.
-The header counts the suite at a glance
-(`✓ up to date · ↑ behind · · missing`), the status row is the feedback channel
-(queued/running tasks, `✓ installed photocraft (0.2.0) · added to app menu`,
-`✗ photocraft · installing: build failed`), and the bottom pane answers "what
-would `u` even change?" with the upstream commits waiting to be pulled — or the
-live build log while a task runs. `?` opens the full key reference: every hint
-with a one-line description of what it does, scrolled with `j`/`k` on short
-terminals.
+(`✓ up to date`, `↑3 3 commits behind`, `? not checked`, `◐ updating…`,
+`✗ build failed`) — so nothing depends on colour alone. A picked row fills its
+square (`■`) in brand blue, and the highlighted row turns every character to
+dark brand ink on the accent bar — focus reads as contrast, not colour. `→`
+opens an indented one-line description of the highlighted app (the official
+getartcraft.com blurb); `←` closes it, and several apps can stay open while you
+move around. The header counts the suite at a glance
+(`✓ up to date · ↑ behind · · missing · ? not checked`), the status row is the
+feedback channel (queued/running tasks, `✓ installed photocraft (0.2.0) ·
+added to app menu`, `✗ photocraft · installing: build failed`), and the bottom
+pane answers "what would `u` even change?" with the upstream commits waiting to
+be pulled — or the live build log while a task runs. `?` opens the full key
+reference: every hint with a one-line description of what it does, scrolled
+with `j`/`k` on short terminals.
 
 Every install and rebuild also registers the app on your desktop: the binary
 lands in `~/.local/bin`, the repo's `packaging/linux/*.desktop` entry and its
@@ -148,7 +164,7 @@ it removes the binary, the desktop entry, the icons *and* the clone in
 | `p` | popup to set how many builds run at once (1–16; low-spec machines should stick to 1–2) |
 | `o` | toggle **attention only** — hide the apps that are up to date |
 | `x` / `Delete` | cancel the running task, or dequeue a queued one — again over the picked set |
-| `r` | rescan all apps from disk (on a background thread) |
+| `r` | rescan from disk (background): clone locations, menu entries, and the upstream check |
 | `?` | toggle the help overlay |
 | `q` / `Esc` | quit — asks a second time while tasks are running |
 | `Ctrl+C` | quit immediately |
@@ -158,8 +174,9 @@ it removes the binary, the desktop entry, the icons *and* the clone in
 (quit) do anything. Picking is a temporary selection: `u`, `i`, `f`, `d`, `x`
 and `Enter` look at the picked rows first and fall back to the highlighted row
 when nothing is picked, so the picks always win. `o` narrows the list to the
-apps that need attention (missing, behind upstream, or failed) — the highlight
-follows the filter, and the header badge says when it is on. At most `-p N`
+apps that need attention (missing, behind upstream, not yet checked, or
+failed) — the highlight follows the filter, and the header badge says when it
+is on. At most `-p N`
 apps compile at once (default 2; `p` opens a popup to change it live, and the
 header shows `⚙ n/limit` while builds run) — the rest queue up (shown as `◌`
 and in the status row).
@@ -181,8 +198,8 @@ The richest tier the terminal supports is used automatically: 24-bit RGB when
 `COLORTERM`/`TERM` advertise it, xterm-256 approximations otherwise, named ANSI
 16 colours below that, and no colour at all under `NO_COLOR`, where bold and
 reverse video still carry every state. Each state is also a glyph and a phrase
-(`✓ up to date`, `↑3 commits behind`, `◐ updating…`, `✗ build failed`), so the
-UI never depends on colour alone.
+(`✓ up to date`, `↑3 commits behind`, `? not checked`, `◐ updating…`,
+`✗ build failed`), so the UI never depends on colour alone.
 
 | Variable | Effect | Default |
 |---|---|---|
@@ -193,9 +210,19 @@ UI never depends on colour alone.
 | Variable | Effect | Default |
 |---|---|---|
 | `ARTCRAFT_GIT_ORG` | GitHub org the suite is cloned from | `storytold` |
+| `ARTCRAFT_REPO_ROOTS` | extra directories searched for suite clones (colon-separated; `$HOME` is always searched) | — |
 | `ARTCRAFT_PARALLEL` | how many apps compile at once (1–16; same as `-p`; low-spec: 1–2) | `2` |
+| `ARTCRAFT_FETCH` | `never` (or `0`/`no`/`off`) = skip the automatic upstream check on launch and `r`; `f` / `u` still fetch | check on |
 | `XDG_CACHE_HOME` | where build logs live | `~/.cache` |
 | `HOME` | where repos are cloned, and `~/.local/bin` for installs | — |
+
+Clones are discovered automatically under `$HOME` (and every `ARTCRAFT_REPO_ROOTS`
+directory) up to three levels deep — `~/photocraft`, `~/src/photocraft`,
+`~/Documents/GitHub/photocraft` — either by directory name or by the clone's
+`github.com/<org>/<repo>` remote (which catches renamed clones and forks).
+Desktop entries are read from `~/.local/share/applications` and
+`$XDG_DATA_DIRS`; binaries are looked up in `~/.local/bin`, `~/.cargo/bin`,
+`/usr/local/bin` and `/usr/bin`.
 
 Logs are written to `$XDG_CACHE_HOME/artcraft-suite-aur/<repo>.log` — git output
 during clone/pull/fetch and cargo output during builds both land there (never on the
@@ -236,6 +263,23 @@ Open the log — cargo's stderr is in there. Press `r` after fixing to rescan.
 **`git pull failed (local changes?)`**
 The repo has local modifications; the app only fast-forwards. Commit/stash first.
 
+**A row said "up to date" but `git pull` brought new commits**
+That was the cached refs talking: a clone's `origin/*` only moves when something
+fetches, and only a fetch (or a pull) makes "behind" honest. Launch and `r` now
+fetch every clone in the background (bounded, so a dead network can't wedge the
+UI) before counting. When the fetch can't run — offline, or
+`ARTCRAFT_FETCH=never` — the row says `? not checked` instead of guessing;
+press `f` (fetch) or `u` (update) once the network is back.
+
+**An app I have installed shows as `· missing`**
+Discovery covers clones up to three levels under `$HOME` (plus any
+`ARTCRAFT_REPO_ROOTS` directories), matched by directory name *or* by the
+clone's `github.com/<org>/<repo>` remote (renamed clones and forks included);
+menu entries are read from `~/.local/share/applications` and the system data
+dirs. A clone buried deeper (`~/code/rust/projects/photocraft`) is outside the
+walk — point `ARTCRAFT_REPO_ROOTS=/path/to/a/parent` at a directory above it.
+Press `r` after changing anything.
+
 **"N task(s) still running — press q again to quit (they keep running)"**
 Quitting does not kill background builds: their process groups are detached, so
 they finish (or keep going) on their own. Press `q` again to leave, or `x` on the
@@ -268,9 +312,11 @@ Source layout — concerns are kept separate on purpose:
 ### Testing
 
 - **Golden frames** (`src/ui.rs`): render at fixed sizes with `TestBackend` and
-  assert on what the user sees — header summary counts, status glyphs *and*
-  their phrases (`✓ up to date`, `↑3 commits behind`), the changelog pane,
-  the live-log handoff, the attention filter, picked squares, the key bar
+  assert on what the user sees — header summary counts (including `? N` for
+  unchecked clones), status glyphs *and* their phrases (`✓ up to date`,
+  `↑3 commits behind`, `? not checked`), the changelog pane,
+  the details footer (clone location + menu state), the live-log handoff, the
+  attention filter, picked squares, the key bar
   fitting 80 columns, help fitting 60x15, and the polite message below the
   minimum.
 - **Palette** (`src/theme.rs`): every tier is asserted — monochrome yields no
@@ -280,15 +326,27 @@ Source layout — concerns are kept separate on purpose:
   selection clamping, `Ctrl+C`, the help overlay swallowing keys, two-step quit,
   dequeueing, `Space`/`Ctrl+Space` picking, batch actions over the picked set
   (never the cursor row), `Enter` installing only the missing picks, the `o`
-  attention filter (including clamping the highlight onto a visible row), failed
+  attention filter (including clamping the highlight onto a visible row and
+  keeping unchecked clones), failed
   tasks counting as attention, the `d` → `y` uninstall confirmation (any other
   key cancels it; busy and not-installed rows are skipped), the `p` parallel-builds
-  popup (apply promotes queued work; Esc keeps the old limit; clamped 1–16), and
-  status tone following the message prefix.
+  popup (apply promotes queued work; Esc keeps the old limit; clamped 1–16),
+  status tone following the message prefix, and the scan pipeline's event
+  flow (`Ev::Loaded` rows + `checking N repos…`, then `Ev::Checked` settling
+  on `ready`/`refreshed`; a scan with nothing to fetch waits for `Checked`).
 - **Engine** (`src/engine.rs`): children are wired to the log file (not the tty),
-  `log_tail` survives invalid UTF-8, the version probe respects its timeout.
+  `log_tail` survives invalid UTF-8, the version probe respects its timeout,
+  repo discovery finds suite clones by name and by git remote at every depth
+  (dot-dirs skipped, shallow copies preferred), `.desktop` entries are matched
+  by stem, `Exec=` and `Icon=` (with `Hidden=true` ignored), and binary lookup
+  prefers `~/.local/bin` over the system paths. The upstream check is
+  integration-tested against a local file remote: a commit lands on the origin
+  after the clone, `behind` stays 0 on the stale refs, and
+  `git_fetch_bounded` makes the count (and the commit list) real.
 - **End-to-end** (`scripts/tui_smoke.py`): boots the real binary in a sized pty,
-  sends real keys, replays the output through a minimal ANSI screen and checks
+  sends real keys (waiting for the scan *and* the background upstream check —
+  the status line reaches `ready` — before the first key),
+  replays the output through a minimal ANSI screen and checks
   alt-screen entry/exit, cursor restore, the summary counters, status phrases,
   the details pane, picking, the attention filter, the parallel-builds popup
   and the frames themselves.
