@@ -47,6 +47,13 @@ build, install and launch each app without leaving the keyboard.
   run, background builds survive quitting, `r` rescans from disk at any time.
 - **Clear feedback** — one status row for queued/running/success/error, every
   state as glyph *and* phrase, failed rows tracked until they succeed.
+- **Measured build progress** — while a build runs, the bottom pane shows a
+  real percentage (`43/80` crates) starting from 0% and filling crate by crate,
+  plus a `~`-ETA; a single running task also gets a compact `~2m · 54%` on the
+  status row. The total comes from a real denominator computed before the build:
+  the exact crate count of the previous successful build (persisted per repo),
+  or a `cargo tree` estimate on the first one. If neither is available the pane
+  shows elapsed time instead of a bar, never a guessed percentage.
 - **Full key reference in-app** — `?` opens a scrollable overlay documenting
   every hint.
 - **Brand theme, honest colour** — ArtCraft palette (the same tokens as
@@ -316,7 +323,9 @@ Source layout — concerns are kept separate on purpose:
   unchecked clones), status glyphs *and* their phrases (`✓ up to date`,
   `↑3 commits behind`, `? not checked`), the changelog pane,
   the details footer (clone location + menu state), the live-log handoff, the
-  attention filter, picked squares, the key bar
+  attention filter, picked squares, a building row's progress bar and `~`-ETA
+  (and that a build with no denominator shows elapsed time, not a fake
+  percentage), the key bar
   fitting 80 columns, help fitting 60x15, and the polite message below the
   minimum.
 - **Palette** (`src/theme.rs`): every tier is asserted — monochrome yields no
@@ -331,9 +340,12 @@ Source layout — concerns are kept separate on purpose:
   tasks counting as attention, the `d` → `y` uninstall confirmation (any other
   key cancels it; busy and not-installed rows are skipped), the `p` parallel-builds
   popup (apply promotes queued work; Esc keeps the old limit; clamped 1–16),
-  status tone following the message prefix, and the scan pipeline's event
+  status tone following the message prefix, the scan pipeline's event
   flow (`Ev::Loaded` rows + `checking N repos…`, then `Ev::Checked` settling
-  on `ready`/`refreshed`; a scan with nothing to fetch waits for `Checked`).
+  on `ready`/`refreshed`; a scan with nothing to fetch waits for `Checked`),
+  and build progress (`Ev::Progress` fills `progress` while a build runs,
+  `Ev::Done` clears it, and a single running task earns a `~`-prefixed ETA on
+  the status row).
 - **Engine** (`src/engine.rs`): children are wired to the log file (not the tty),
   `log_tail` survives invalid UTF-8, the version probe respects its timeout,
   repo discovery finds suite clones by name and by git remote at every depth
@@ -342,7 +354,14 @@ Source layout — concerns are kept separate on purpose:
   prefers `~/.local/bin` over the system paths. The upstream check is
   integration-tested against a local file remote: a commit lands on the origin
   after the clone, `behind` stays 0 on the stale refs, and
-  `git_fetch_bounded` makes the count (and the commit list) real.
+  `git_fetch_bounded` makes the count (and the commit list) real. Build
+  progress is counted from cargo's `--message-format=json` stream: cached
+  (`fresh: true`) crates are skipped so the number is work actually done, and
+  the percentage/ETA math (`Progress::pct`, `Progress::eta_secs`) is asserted
+  against fixed elapsed times. The percentage's denominator is seeded before
+  the build from a persisted exact unit count (or a `cargo tree` estimate),
+  so it starts at 0% and climbs; a build with no obtainable denominator shows
+  elapsed time rather than a bar.
 - **End-to-end** (`scripts/tui_smoke.py`): boots the real binary in a sized pty,
   sends real keys (waiting for the scan *and* the background upstream check —
   the status line reaches `ready` — before the first key),

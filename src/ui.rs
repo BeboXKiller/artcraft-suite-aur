@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, Tone};
-use crate::engine::AppInfo;
+use crate::engine::{self, AppInfo};
 use crate::theme::{Sty, Tint};
 
 /// Smallest grid this layout is designed for; below it we show a polite message.
@@ -290,7 +290,16 @@ fn details_for<'a>(app: &App, a: &AppInfo, s: Sty, width: usize) -> (String, Vec
     let repo = a.repo;
     if let Some(verb) = app.busy.get(repo) {
         let title = format!(" {verb} — {repo} ");
-        let lines = tail_lines(&app.log, s.fg(Tint::Muted), width, "(waiting for output…)");
+        let mut lines = Vec::new();
+        if let Some(p) = app.progress.get(repo) {
+            lines.push(progress_line(p, s, width));
+        }
+        lines.extend(tail_lines(
+            &app.log,
+            s.fg(Tint::Muted),
+            width,
+            "(waiting for output…)",
+        ));
         return (title, lines);
     }
     if let Some(err) = app.failed.get(repo) {
@@ -428,6 +437,33 @@ fn short_dir(dir: &std::path::Path) -> String {
         return format!("~/{}", rest.display());
     }
     dir.display().to_string()
+}
+
+/// The selected build's progress bar and its numbers, above the live log.
+fn progress_line<'a>(p: &engine::Progress, s: Sty, width: usize) -> Line<'a> {
+    match (p.pct(), p.eta_secs()) {
+        (Some(pct), eta) => {
+            // Keep bar + numbers inside the pane even when it's narrow.
+            let eta_str = eta.map_or_else(|| "…".into(), crate::app::coarse_eta);
+            let text = format!("{pct}% · {eta_str} left · {}/{}", p.done, p.total);
+            let bar_w = width.saturating_sub(text.chars().count() + 3).max(4);
+            let filled = bar_w * pct as usize / 100;
+            let bar: String = "█".repeat(filled) + &"░".repeat(bar_w - filled);
+            Line::from(vec![
+                Span::styled(format!(" {bar} "), s.fg(Tint::Accent)),
+                Span::styled(text, s.fg(Tint::Muted)),
+            ])
+        }
+        // No denominator (the pre-build crate count couldn't be obtained):
+        // show elapsed time rather than a bar that would be a guess.
+        (None, _) => Line::from(Span::styled(
+            format!(
+                " building… {} elapsed",
+                crate::app::coarse_eta(p.elapsed_secs())
+            ),
+            s.fg(Tint::Muted),
+        )),
+    }
 }
 
 fn tail_lines<'a>(
@@ -674,7 +710,6 @@ fn clip(s: &str, w: usize) -> String {
 mod tests {
     use super::*;
     use crate::app::App;
-    use crate::engine::AppInfo;
     use crate::theme::{Depth, Palette};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -921,6 +956,78 @@ mod tests {
         assert!(
             rows.iter().any(|r| r.contains("no menu entry")),
             "a missing menu entry must be stated: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_building_row_shows_a_bar_and_a_tilde_eta() {
+        // A build at 43/80 crates, started two minutes ago: honest numbers, and
+        // the ETA is prefixed with `~` so it never reads as a countdown.
+        let mut a = app();
+        a.busy.insert("photocraft".into(), "building".into());
+        a.progress.insert(
+            "photocraft".into(),
+            engine::Progress {
+                done: 43,
+                total: 80,
+                started: std::time::Instant::now() - std::time::Duration::from_secs(130),
+            },
+        );
+        let rows = render(&a, 80, 24);
+        let joined = rows.join("\n");
+        assert!(joined.contains("building — photocraft"), "{joined:?}");
+        assert!(joined.contains("█"), "no filled bar cell: {joined:?}");
+        assert!(joined.contains("53%"), "wrong percentage: {joined:?}");
+        assert!(joined.contains("43/80"), "crate count missing: {joined:?}");
+        assert!(
+            joined.contains('~'),
+            "an ETA must read as an estimate: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn a_build_starts_at_zero_with_an_empty_bar_not_a_full_one() {
+        // The reported bug: the bar was pinned at 100% from the first crate
+        // because the denominator was set equal to the count. A seeded build
+        // must start at 0% with an empty bar and fill in from there.
+        let mut a = app();
+        a.busy.insert("photocraft".into(), "building".into());
+        a.progress.insert(
+            "photocraft".into(),
+            engine::Progress {
+                done: 0,
+                total: 440,
+                started: std::time::Instant::now(),
+            },
+        );
+        let joined = render(&a, 80, 24).join("\n");
+        assert!(joined.contains("0%"), "not at zero: {joined:?}");
+        assert!(joined.contains("0/440"), "crate count missing: {joined:?}");
+        assert!(
+            joined.contains('░') && !joined.contains('█'),
+            "a zero-percent bar must be empty: {joined:?}"
+        );
+    }
+
+    #[test]
+    fn a_build_with_no_denominator_shows_elapsed_not_a_fake_percent() {
+        // The denominator couldn't be obtained: there is no honest percentage,
+        // so show elapsed time rather than a bar that would be a guess.
+        let mut a = app();
+        a.busy.insert("photocraft".into(), "building".into());
+        a.progress.insert(
+            "photocraft".into(),
+            engine::Progress {
+                done: 0,
+                total: 0,
+                started: std::time::Instant::now() - std::time::Duration::from_secs(12),
+            },
+        );
+        let joined = render(&a, 80, 24).join("\n");
+        assert!(joined.contains("elapsed"), "{joined:?}");
+        assert!(
+            !joined.contains('%'),
+            "no percentage without a total: {joined:?}"
         );
     }
 

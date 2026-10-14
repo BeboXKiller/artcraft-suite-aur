@@ -30,6 +30,30 @@ pub enum Tone {
     Busy,
 }
 
+/// Coarse, `~`-prefixed estimate — seconds rounded up to the unit it names.
+///
+/// The `~` is load-bearing: crate compile times vary wildly, so this is an
+/// extrapolation from crates-per-second, never a countdown to trust.
+pub fn coarse_eta(secs: u64) -> String {
+    if secs < 60 {
+        format!("~{secs}s")
+    } else if secs < 3600 {
+        format!("~{}m", secs.div_ceil(60))
+    } else {
+        format!("~{}h", secs.div_ceil(3600))
+    }
+}
+
+/// One running task's compact suffix: elapsed while the total is still ramping
+/// in, then `~ETA · 54%`. `None` before any crate finishes (nothing to show).
+fn compact_progress(p: &engine::Progress) -> Option<String> {
+    let elapsed = coarse_eta(p.elapsed_secs());
+    match (p.eta_secs(), p.pct()) {
+        (Some(eta), Some(pct)) => Some(format!("· {} · {pct}%", coarse_eta(eta))),
+        _ => Some(format!("· {elapsed}")),
+    }
+}
+
 pub struct App {
     pub apps: Vec<AppInfo>,
     /// highlighted row — the fallback target when nothing is picked
@@ -37,6 +61,8 @@ pub struct App {
     /// explicitly picked rows (`Space` / `Ctrl+Space`); empty means "use `sel`"
     pub picks: HashSet<usize>,
     pub busy: HashMap<String, String>,
+    /// repo → live build progress, while a build reports it
+    pub progress: HashMap<String, engine::Progress>,
     pub pending: VecDeque<(String, Action)>,
     /// repo → error of the last failed task, until a retry clears it
     pub failed: HashMap<String, String>,
@@ -79,6 +105,7 @@ impl App {
             sel: 0,
             picks: HashSet::new(),
             busy: HashMap::new(),
+            progress: HashMap::new(),
             pending: VecDeque::new(),
             failed: HashMap::new(),
             filter_attention: false,
@@ -116,6 +143,7 @@ impl App {
                     result,
                 } => {
                     self.busy.remove(&repo);
+                    self.progress.remove(&repo);
                     let text = match result {
                         Ok(m) => {
                             self.failed.remove(&repo);
@@ -131,6 +159,9 @@ impl App {
                         self.rescan_at(idx);
                     }
                     self.pump();
+                }
+                Ev::Progress { repo, progress } => {
+                    self.progress.insert(repo, progress);
                 }
                 Ev::Scanned { index, info } => {
                     // the suite order is fixed, but guard against a stale index anyway
@@ -185,9 +216,23 @@ impl App {
     }
 
     /// What the status row says, and how loud it should look.
+    /// The highlighted row's live build progress, if it's building.
+    pub fn selected_progress(&self) -> Option<&engine::Progress> {
+        let repo = self.apps.get(self.sel)?.repo;
+        self.progress.get(repo)
+    }
+
     pub fn status_line(&self) -> (String, Tone) {
         let mut parts = Vec::new();
         if let Some(s) = engine::busy_summary(&self.busy) {
+            let mut s = s;
+            // A single running task earns a compact "~2m · 54%"; parallel
+            // builds would crowd the row, so they keep the plain verb list.
+            if self.busy.len() == 1
+                && let Some(extra) = self.selected_progress().and_then(compact_progress)
+            {
+                s.push_str(&format!(" {extra}"));
+            }
             parts.push(s);
         }
         if !self.pending.is_empty() {
@@ -811,6 +856,7 @@ impl App {
             sel: 0,
             picks: HashSet::new(),
             busy: HashMap::new(),
+            progress: HashMap::new(),
             pending: VecDeque::new(),
             failed: HashMap::new(),
             filter_attention: false,
@@ -838,6 +884,7 @@ impl App {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::time::{Duration, Instant};
 
     fn apps(n: usize) -> Vec<AppInfo> {
         (0..n)
@@ -1290,5 +1337,64 @@ mod tests {
         tx.send(Ev::Checked).expect("send");
         app.drain(&rx);
         assert_eq!(app.msg, "ready");
+    }
+
+    #[test]
+    fn progress_events_fill_the_map_and_done_clears_it() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::with_apps(apps(1));
+        let started = Instant::now() - Duration::from_secs(20);
+        let p = engine::Progress {
+            done: 10,
+            total: 40,
+            started,
+        };
+        tx.send(Ev::Progress {
+            repo: "a".into(),
+            progress: p.clone(),
+        })
+        .expect("send");
+        app.drain(&rx);
+        assert_eq!(
+            app.progress.get("a").map(|p| (p.done, p.total)),
+            Some((10, 40))
+        );
+        assert_eq!(app.selected_progress().map(|p| p.total), Some(40));
+
+        // The task finishing must not leave a stale percentage on screen.
+        app.busy.insert("a".into(), "building".into());
+        tx.send(Ev::Done {
+            repo: "a".into(),
+            action: Action::Install,
+            result: Ok("installed".into()),
+        })
+        .expect("send");
+        app.drain(&rx);
+        assert!(
+            !app.progress.contains_key("a"),
+            "progress must clear on Done"
+        );
+    }
+
+    #[test]
+    fn a_single_running_task_gets_a_compact_eta_on_the_status_row() {
+        let mut app = App::with_apps(apps(1));
+        app.busy.insert("a".into(), "building".into());
+        app.progress.insert(
+            "a".into(),
+            engine::Progress {
+                done: 10,
+                total: 40,
+                started: Instant::now() - Duration::from_secs(20),
+            },
+        );
+        let (line, tone) = app.status_line();
+        assert_eq!(tone, Tone::Busy);
+        assert!(line.contains("building a"), "{line:?}");
+        assert!(
+            line.contains('~'),
+            "the ETA must read as an estimate: {line:?}"
+        );
+        assert!(line.contains("25%"), "wrong percentage: {line:?}");
     }
 }

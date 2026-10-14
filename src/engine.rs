@@ -3,12 +3,13 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 /// The Craft App Suite as listed on getartcraft.com/apps, plus the launcher.
 pub const SUITE: &[&str] = &[
@@ -91,6 +92,61 @@ pub struct AppInfo {
     pub menu: bool,
 }
 
+/// Measured build progress, from cargo's own `--message-format=json` output:
+/// one `compiler-artifact` event per crate cargo produces (fresh or not).
+///
+/// `total` is a real denominator computed *before* the build starts (see
+/// [`estimate_units`]): the exact unit count from the previous successful
+/// build, or a `cargo tree` estimate when there isn't one. It stays fixed for
+/// the whole build — `done` counts the crates that actually compile (non-
+/// `fresh`), so the percentage starts at zero and climbs crate by crate. When
+/// the denominator couldn't be obtained `total` is `0` and [`Self::pct`]
+/// returns `None` rather than reporting a wrong percentage.
+#[derive(Clone, Debug)]
+pub struct Progress {
+    /// Crates compiled so far (non-`fresh` artifacts).
+    pub done: u64,
+    /// Crates the build is expected to compile; fixed for the build, `0` when
+    /// unknown (in which case the UI shows elapsed time, not a bar).
+    pub total: u64,
+    /// When the build phase started, for the elapsed/remaining estimate.
+    pub started: Instant,
+}
+
+impl Progress {
+    /// Percentage complete, or `None` while the total is still unknown.
+    ///
+    /// Linear on crate count, not on time: crates are what actually get built.
+    pub fn pct(&self) -> Option<u8> {
+        if self.total == 0 {
+            return None;
+        }
+        let p = (self.done * 100 / self.total).min(100);
+        Some(p as u8)
+    }
+
+    /// Seconds left, linearly extrapolated from crates done. `None` until
+    /// some real work has finished and a total is known — before that there's
+    /// nothing to extrapolate from.
+    pub fn eta_secs(&self) -> Option<u64> {
+        if self.done == 0 || self.total == 0 || self.done >= self.total {
+            return None;
+        }
+        let elapsed = self.started.elapsed().as_secs_f64();
+        if elapsed <= 0.0 {
+            return None;
+        }
+        let rate = self.done as f64 / elapsed;
+        let remaining = (self.total - self.done) as f64 / rate;
+        Some(remaining.ceil() as u64)
+    }
+
+    /// Seconds already spent, for the pre-percentage warm-up line.
+    pub fn elapsed_secs(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+}
+
 #[derive(Debug)]
 pub enum Ev {
     Done {
@@ -98,6 +154,8 @@ pub enum Ev {
         action: Action,
         result: Result<String, String>,
     },
+    /// A build compiled one more crate; carries the live [`Progress`].
+    Progress { repo: String, progress: Progress },
     /// Fresh AppInfo for `apps[index]`, computed on a worker thread.
     Scanned { index: usize, info: AppInfo },
     /// A full scan finished — discovery, menu entries and every row in it.
@@ -133,6 +191,13 @@ pub fn log_dir() -> PathBuf {
 
 pub fn log_file(repo: &str) -> PathBuf {
     log_dir().join(format!("{repo}.log"))
+}
+
+/// Last successful build's exact unit count for a repo — the seed for the next
+/// build's progress denominator. Written by `build_install`, read by
+/// [`estimate_units`].
+fn units_file(repo: &str) -> PathBuf {
+    log_dir().join(format!("{repo}.units"))
 }
 
 /// Where a clone would land if nothing is discovered (`~/<repo>`).
@@ -508,6 +573,74 @@ pub fn pkg_of(repo: &str, dir: &Path) -> Option<String> {
         }
     }
     best
+}
+
+/// How many crates a build of `pkg` in `dir` will compile — the denominator
+/// that lets a percentage start at zero instead of guessing.
+///
+/// Prefers the exact unit count persisted from the previous successful build
+/// of the same repo ([`units_file`]); when there isn't one (first build) it
+/// falls back to counting unique crates in `cargo tree`'s normal+build graph.
+/// The tree is a slight underestimate (it doesn't show build-script,
+/// proc-macro or host/target units cargo also produces), but it's a real,
+/// pre-computed number that makes the bar fill honestly; after the first
+/// build the exact count is persisted and takes over.
+///
+/// Returns `0` on any failure (no lockfile, odd workspace, cargo missing) —
+/// meaning "unknown", never a fabricated number, so the caller shows elapsed
+/// time instead of a bar.
+fn estimate_units(dir: &Path, repo: &str, pkg: &str) -> u64 {
+    // Exact count from the last successful build of this repo.
+    if let Ok(text) = std::fs::read_to_string(units_file(repo)) {
+        if let Ok(n) = text.trim().parse::<u64>() {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    // First build (or a stale/invalid cache): estimate from the dep graph.
+    // `cargo tree` has no --release (it isn't a build command); the crate set
+    // is the same for either profile, and the root package is already the
+    // first line so it needs no +1.
+    let mut cmd = Command::new("cargo");
+    cmd.args([
+        "tree",
+        "-p",
+        pkg,
+        "--edges",
+        "normal,build",
+        "--prefix",
+        "none",
+    ])
+    .current_dir(dir)
+    .env("PATH", child_env_path())
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    let Ok(out) = cmd.output() else { return 0 };
+    if !out.status.success() {
+        return 0;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Dedupe marker `(\*)` marks a crate shown elsewhere; strip it so repeats
+    // collapse to the same crate name and `sort -u` counts each crate once.
+    let mut crates: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for line in text.lines() {
+        let name = line.trim().trim_end_matches(" (*)").trim();
+        if !name.is_empty() {
+            crates.insert(name);
+        }
+    }
+    crates.len() as u64
+}
+
+/// Remember a build's exact unit count so the next progress bar is precise.
+fn save_units(repo: &str, units: u64) {
+    if units == 0 {
+        return;
+    }
+    let _ = std::fs::create_dir_all(log_dir());
+    let _ = std::fs::write(units_file(repo), units.to_string());
 }
 
 /// Version string of an installed binary.
@@ -909,25 +1042,151 @@ pub fn uninstall(repo: &str, dir: &Path) -> Result<String, String> {
     })
 }
 
-fn build_install(dir: &Path, repo: &str) -> Result<String, String> {
+/// Read a build's output line by line, tee every line to the shared log, and
+/// — on the JSON (stdout) side — count the crates cargo actually compiles.
+///
+/// `seed` is the pre-computed denominator ([`estimate_units`]); it's sent as a
+/// `done: 0` event before the first crate so the bar renders empty from the
+/// start. The function returns how many `compiler-artifact` events it saw in
+/// total (fresh and non-fresh alike) — the exact unit count, worth persisting
+/// so the next build's denominator is precise rather than a tree estimate.
+///
+/// The counting is what turns "still building" into a real percentage: cargo
+/// prints one `compiler-artifact` object per produced crate, and `fresh: true`
+/// marks crates it skipped from cache (so they aren't work in progress).
+fn pump_build_lines(
+    stream: Option<impl Read>,
+    repo: &str,
+    log_handle: &Arc<Mutex<File>>,
+    tx: &Sender<Ev>,
+    count: bool,
+    seed: u64,
+) -> u64 {
+    let Some(stream) = stream else { return 0 };
+    let mut progress = Progress {
+        done: 0,
+        total: seed,
+        started: Instant::now(),
+    };
+    if count && seed > 0 {
+        // Show the empty bar immediately, before the first crate finishes.
+        let _ = tx.send(Ev::Progress {
+            repo: repo.to_string(),
+            progress: progress.clone(),
+        });
+    }
+    let mut units = 0;
+    let reader = BufReader::new(stream);
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        if let Ok(mut f) = log_handle.lock() {
+            use std::io::Write;
+            let _ = writeln!(f, "{line}");
+        }
+        if count && is_artifact(&line) {
+            // Every artifact event (fresh or not) is one unit cargo produced.
+            units += 1;
+            // Only a non-fresh artifact is real progress toward done.
+            if artifact_progress(&line).is_some() {
+                progress.done += 1;
+                let _ = tx.send(Ev::Progress {
+                    repo: repo.to_string(),
+                    progress: progress.clone(),
+                });
+            }
+        }
+    }
+    units
+}
+
+/// True for any `compiler-artifact` event — cargo's per-crate "I produced
+/// this" line, whether it just compiled it or served it fresh from cache.
+fn is_artifact(line: &str) -> bool {
+    line.contains("\"compiler-artifact\"")
+}
+
+/// Parse one `--message-format=json` line: `Some(1)` when it's a freshly
+/// compiled artifact, else `None`.
+///
+/// Cargo never emits a total — it prints one `compiler-artifact` object per
+/// crate as it compiles, so there is no denominator to read here. The caller
+/// supplies one up front ([`estimate_units`]) and treats each non-`fresh`
+/// artifact as one crate of real work done.
+///
+/// Deliberately a hand-parse rather than a JSON dependency: the two fields we
+/// need (`reason`, `fresh`) are flat top-level scalars, so a scan is honest and
+/// keeps the package dependency-free.
+fn artifact_progress(line: &str) -> Option<u64> {
+    if !is_artifact(line) {
+        return None;
+    }
+    // A cached crate is `fresh: true` — cargo skipped it, so it isn't progress.
+    if line.contains("\"fresh\":true") {
+        return None;
+    }
+    Some(1)
+}
+
+fn build_install(dir: &Path, repo: &str, tx: &Sender<Ev>) -> Result<String, String> {
     let pkg = pkg_of(repo, dir).ok_or("no desktop app package found under apps/")?;
+    // Real denominator before the build starts: exact count from the last
+    // successful build, or a cargo-tree estimate on the first one. `0` means
+    // "unknown" and degrades to an elapsed-time line, never a lying full bar.
+    let seed = estimate_units(dir, repo, &pkg);
     let _ = std::fs::create_dir_all(log_dir());
     let log = log_file(repo);
-    let file = File::create(&log).map_err(|e| format!("log: {e}"))?;
-    let err_file = file.try_clone().map_err(|e| format!("log: {e}"))?;
     let mut cmd = Command::new("cargo");
-    cmd.args(["build", "--release", "-p", &pkg])
+    // `--message-format=json` makes cargo emit one `compiler-artifact` JSON
+    // line per produced crate — the only honest signal for a percentage.
+    cmd.args(["build", "--release", "-p", &pkg, "--message-format=json"])
         .current_dir(dir)
         .env("PATH", child_env_path())
-        .stdout(Stdio::from(file))
-        .stderr(Stdio::from(err_file));
-    let s = run_registered(repo, &mut cmd)?;
-    if s.signal().is_some() {
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.process_group(0);
+    let mut child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
+    let pid = child.id();
+    if let Ok(mut reg) = pid_registry().lock() {
+        reg.insert(repo.to_string(), pid);
+    }
+    // Both streams tee to the same log (the details pane and log_tail read it).
+    // Each reader runs on its own thread so neither pipe can fill and deadlock
+    // the other; a Mutex<File> serializes their appends. Only stdout carries
+    // cargo's JSON, so only that side counts artifacts and emits progress.
+    let log_handle = Arc::new(Mutex::new(
+        File::create(&log).map_err(|e| format!("log: {e}"))?,
+    ));
+    let out = child.stdout.take();
+    let err = child.stderr.take();
+    let repo_owned = repo.to_string();
+    let out_handle = {
+        let log_handle = Arc::clone(&log_handle);
+        let repo = repo_owned.clone();
+        let tx = tx.clone();
+        std::thread::spawn(move || pump_build_lines(out, &repo, &log_handle, &tx, true, seed))
+    };
+    let err_handle = {
+        let log_handle = Arc::clone(&log_handle);
+        let repo = repo_owned.clone();
+        let tx = tx.clone();
+        std::thread::spawn(move || pump_build_lines(err, &repo, &log_handle, &tx, false, 0))
+    };
+    let status = child.wait().map_err(|e| format!("wait: {e}"))?;
+    if let Ok(mut reg) = pid_registry().lock() {
+        reg.remove(repo);
+    }
+    // Total units cargo produced (fresh + compiled) — the exact denominator,
+    // persisted so the next build's bar is precise instead of tree-estimated.
+    let units = out_handle.join().unwrap_or(0);
+    let _ = err_handle.join();
+    if status.signal().is_some() {
         return Err("cancelled".into());
     }
-    if !s.success() {
+    if !status.success() {
         return Err(format!("build failed - see {}", log.display()));
     }
+    save_units(repo, units);
     let src = dir.join("target/release").join(&pkg);
     let dst = bin_dir().join(&pkg);
     std::fs::create_dir_all(bin_dir()).map_err(|e| e.to_string())?;
@@ -941,13 +1200,18 @@ fn build_install(dir: &Path, repo: &str) -> Result<String, String> {
     })
 }
 
-pub fn run_action(repo: &str, dir: &Path, action: Action) -> Result<String, String> {
+pub fn run_action(
+    repo: &str,
+    dir: &Path,
+    action: Action,
+    tx: &Sender<Ev>,
+) -> Result<String, String> {
     match action {
         Action::Install => {
             if !dir.join("Cargo.toml").is_file() {
                 git_clone(repo, dir)?;
             }
-            build_install(dir, repo)
+            build_install(dir, repo, tx)
         }
         Action::Update => {
             if !dir.join("Cargo.toml").is_file() {
@@ -961,7 +1225,7 @@ pub fn run_action(repo: &str, dir: &Path, action: Action) -> Result<String, Stri
             if before == after && bin_ok {
                 return Ok(format!("{repo}: up to date"));
             }
-            build_install(dir, repo)
+            build_install(dir, repo, tx)
         }
         Action::Fetch => {
             if !dir.join("Cargo.toml").is_file() {
@@ -990,7 +1254,7 @@ pub fn run_action(repo: &str, dir: &Path, action: Action) -> Result<String, Stri
 
 pub fn spawn(repo: String, dir: PathBuf, action: Action, tx: Sender<Ev>) {
     std::thread::spawn(move || {
-        let result = run_action(&repo, &dir, action);
+        let result = run_action(&repo, &dir, action, &tx);
         let _ = tx.send(Ev::Done {
             repo,
             action,
@@ -1046,6 +1310,93 @@ pub fn busy_summary(busy: &HashMap<String, String>) -> Option<String> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// A `Progress` whose clock reads `elapsed` seconds ago.
+    fn progress_at(done: u64, total: u64, elapsed: u64) -> Progress {
+        Progress {
+            done,
+            total,
+            started: Instant::now() - Duration::from_secs(elapsed),
+        }
+    }
+
+    #[test]
+    fn progress_pct_waits_for_a_real_denominator() {
+        assert_eq!(progress_at(0, 0, 0).pct(), None, "no total, no percentage");
+        assert_eq!(progress_at(0, 80, 0).pct(), Some(0));
+        assert_eq!(progress_at(43, 80, 0).pct(), Some(53));
+        assert_eq!(progress_at(80, 80, 0).pct(), Some(100));
+        // done can momentarily exceed a slightly-underestimated total (the
+        // cargo-tree seed misses build-script units); the bar must clamp
+        // rather than claim 180%.
+        assert_eq!(progress_at(90, 80, 0).pct(), Some(100));
+    }
+
+    #[test]
+    fn progress_eta_is_linear_and_never_trusts_zero_work() {
+        // 10 of 40 crates in ~20s → 30 left at 0.5 crates/s → ~60s. The clock
+        // ticks forward during the test, so the rate is only ever slightly low.
+        let eta = progress_at(10, 40, 20).eta_secs().expect("some eta");
+        assert!((60..=62).contains(&eta), "expected ~60s, got {eta}s");
+        assert_eq!(progress_at(0, 40, 20).eta_secs(), None, "nothing done yet");
+        assert_eq!(progress_at(40, 40, 20).eta_secs(), None, "nothing left");
+        assert_eq!(progress_at(0, 0, 20).eta_secs(), None, "no total");
+    }
+
+    #[test]
+    fn artifact_progress_skips_fresh_and_non_artifact_lines() {
+        assert_eq!(
+            artifact_progress(r#"{"reason":"compiler-artifact","fresh":false}"#),
+            Some(1)
+        );
+        assert_eq!(
+            artifact_progress(r#"{"reason":"compiler-artifact","fresh":true}"#),
+            None,
+            "a cached crate is not progress"
+        );
+        assert_eq!(artifact_progress(r#"{"reason":"compiler-message"}"#), None);
+        assert_eq!(artifact_progress("not json at all"), None);
+    }
+
+    #[test]
+    fn is_artifact_matches_any_compiler_artifact() {
+        // Every artifact event (fresh or not) is one unit cargo produced, so
+        // `is_artifact` is the wider net; `artifact_progress` is the subset
+        // that counts as real work done.
+        assert!(is_artifact(
+            r#"{"reason":"compiler-artifact","fresh":false}"#
+        ));
+        assert!(is_artifact(
+            r#"{"reason":"compiler-artifact","fresh":true}"#
+        ));
+        assert!(!is_artifact(r#"{"reason":"compiler-message"}"#));
+        assert!(!is_artifact("not json at all"));
+    }
+
+    #[test]
+    fn a_persisted_unit_count_seeds_the_next_build() {
+        // After a successful build the exact unit count is remembered, and the
+        // next build reads it back instead of re-estimating from cargo tree.
+        // The persisted file short-circuits before cargo tree runs, so a bogus
+        // directory proves no tree call is needed.
+        let repo = "engine-test-units";
+        save_units(repo, 536);
+        assert_eq!(
+            estimate_units(Path::new("/nonexistent"), repo, "pkg"),
+            536,
+            "the persisted exact count must win over a tree estimate"
+        );
+        cleanup(&units_file(repo));
+    }
+
+    #[test]
+    fn an_unknown_denominator_is_zero_not_a_guess() {
+        // No persisted count and no cargo tree (bogus dir): report 0 — the
+        // caller shows elapsed time rather than a bar built on a fabrication.
+        let repo = "engine-test-units-unknown";
+        let _ = std::fs::remove_file(units_file(repo));
+        assert_eq!(estimate_units(Path::new("/nonexistent"), repo, "pkg"), 0);
+    }
 
     fn cleanup(path: &Path) {
         let _ = std::fs::remove_file(path);
