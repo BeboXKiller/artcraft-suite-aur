@@ -134,12 +134,14 @@ fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
 fn draw_list(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
     // borders (2) + highlight symbol (2)
     let inner_w = area.width.saturating_sub(4) as usize;
-    // Responsive columns: mark(3) + glyph(5) are fixed, the status phrase keeps
-    // an 18-column reserve, and repo + version share the rest — version taking
+    // Responsive columns: mark(3) + glyph(6) are fixed, the status phrase keeps
+    // a 22-column reserve, and repo + version share the rest — version taking
     // two thirds of the slack, so the middle column stops being the cut-off one
     // as the terminal grows. Below 52 usable columns the version hides entirely.
+    // The phrase reserve is sized for the longest phrase ("999 commits behind",
+    // 19 chars) plus a little right padding so it never crowds the border.
     let show_version = inner_w >= 52;
-    let slack = inner_w.saturating_sub(8 + 16 + 11 + 18);
+    let slack = inner_w.saturating_sub(9 + 16 + 11 + 22);
     let version_extra = slack * 2 / 3;
     let (repo_w, version_w) = if show_version {
         (16 + slack - version_extra, 11 + version_extra)
@@ -170,7 +172,7 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
         };
         let mut spans = vec![
             Span::styled(format!(" {mark} "), mark_style),
-            Span::styled(format!(" {} ", pad(&glyph, 3)), cell(tint)),
+            Span::styled(format!(" {} ", pad(&glyph, 4)), cell(tint)),
             Span::styled(
                 pad(a.repo, repo_w),
                 if selected { bar.bold() } else { s.bold() },
@@ -909,6 +911,29 @@ mod tests {
         assert!(
             row.contains("3 commits behind"),
             "no behind phrase: {row:?}"
+        );
+    }
+
+    #[test]
+    fn a_three_digit_behind_count_keeps_the_phrase_and_glyph_intact() {
+        // At 3 digits "100 commits behind" is 18 chars and the glyph is
+        // "↑99+" (4 chars). Both used to overflow their columns and clip the
+        // tail, so the phrase lost its "behind" and the glyph read "↑9…".
+        let mut a = app();
+        a.apps.push(app_info("wordcraft", true, true, Some(1234)));
+        let row = render(&a, 80, 24)
+            .iter()
+            .find(|r| r.contains("wordcraft"))
+            .expect("row present")
+            .clone();
+        assert!(row.contains("↑99+"), "behind glyph truncated: {row:?}");
+        assert!(
+            row.contains("1234 commits behind"),
+            "behind phrase clipped: {row:?}"
+        );
+        assert!(
+            row.chars().count() <= 80,
+            "row wider than the screen: {row:?}"
         );
     }
 
