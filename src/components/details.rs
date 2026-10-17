@@ -99,6 +99,27 @@ impl DetailsComponent {
             ));
             return (title, lines);
         }
+        // waiting in the queue: say so before the normal content — the row
+        // already reads ◌ queued, the pane explains what happens next
+        if let Some(pos) = tasks.pending.iter().position(|(r, _)| r == repo) {
+            let action = tasks.pending[pos].1;
+            let title = format!(" ◌ {repo} — queued ");
+            let lines = vec![
+                Line::from(Span::styled(
+                    format!(" {} starts next", action.label()),
+                    s.fg(Tint::Accent),
+                )),
+                Line::from(Span::styled(
+                    format!(
+                        " position {} of {} · x cancels",
+                        pos + 1,
+                        tasks.pending.len()
+                    ),
+                    s.fg(Tint::Faint),
+                )),
+            ];
+            return (title, lines);
+        }
         if let Some(err) = tasks.failed.get(repo) {
             let title = format!(" ✗ {repo} — build failed ");
             let mut lines = vec![Line::from(Span::styled(format!(" {err}"), s.fg(Tint::Bad)))];
@@ -403,6 +424,29 @@ mod tests {
         let joined = rows.join("\n");
         assert!(joined.contains("installing — photocraft"), "{joined:?}");
         assert!(joined.contains("Compiling photocraft"), "{joined:?}");
+    }
+
+    #[test]
+    fn a_queued_task_says_so_in_the_details_pane() {
+        let mut a = app();
+        // behind as well: without the queued branch the pane would show the
+        // update card, so the negative assert proves the interception
+        a.list.apps[0].behind = Some(3);
+        a.tasks
+            .pending
+            .push_back(("photocraft".into(), engine::Action::Update));
+        a.tasks
+            .pending
+            .push_back(("other".into(), engine::Action::Install));
+        let joined = render(&a, 80, 24).join("\n");
+        assert!(joined.contains("photocraft — queued"), "{joined:?}");
+        assert!(joined.contains("updating starts next"), "{joined:?}");
+        assert!(joined.contains("position 1 of 2"), "{joined:?}");
+        assert!(joined.contains("x cancels"), "{joined:?}");
+        assert!(
+            !joined.contains("What's new in"),
+            "queued pane fell through to content: {joined:?}"
+        );
     }
 
     #[test]
