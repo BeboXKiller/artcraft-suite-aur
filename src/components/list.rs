@@ -3,7 +3,7 @@
 //! Step 4b adds the rendering (`render`, `row_state` and helpers) moved
 //! verbatim from `ui.rs`; task state is passed as arguments. The `enter`/pick
 //! decision logic stays in `app.rs` until step 4c. Task-dependent reads take
-//! the failed map as an argument (AppContext stays minimal; TaskManager owns
+//! the failed map as an argument (data flows as arguments; TaskManager owns
 //! that data from step 5 on).
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -28,8 +28,8 @@ pub struct ListComponent {
 }
 
 /// Read-only slice of the task state the list needs to draw a row. Keeps
-/// [`ListComponent::render`] inside clippy's argument limit without growing
-/// `AppContext`; TaskManager hands these out from step 5 on.
+/// [`ListComponent::render`] inside clippy's argument limit without a wider
+/// context argument; TaskManager hands these out from step 5 on.
 pub struct TaskView<'a> {
     pub busy: &'a HashMap<String, String>,
     pub pending: &'a VecDeque<(String, Action)>,

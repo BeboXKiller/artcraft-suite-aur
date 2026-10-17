@@ -204,10 +204,10 @@ signature changed. Producers: `scan_pipeline` (app.rs:850) and
 - **Cross-component reads are the norm, not the exception:** `row_state` (list)
   needs busy/pending/failed (tasks); `summary`/status (header) need
   apps+busy+pending+progress+filter+track+max_parallel; details needs
-  apps+tasks+log. `AppContext` stays minimal ⇒ data must flow as method
-  arguments; the trait's fixed `render` signature cannot carry it, so
-  components get inherent `render` methods with explicit args and the trait is
-  used where it fits (overlays). Justified deviation (decision 2).
+  apps+tasks+log. Data must flow as method arguments — no shared context
+  object; components get inherent `render` methods with explicit args, and the
+  component trait is limited to key dispatch (final state; see §10). Justified
+  deviation (decision 2).
 - **Order-sensitive quirks** (help/`?`/Ctrl precedence, the End/G gap in help,
   the uninstall-`y` fall-through, `confirm_quit` clearing rules) must be
   replicated exactly.

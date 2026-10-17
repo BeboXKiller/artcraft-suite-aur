@@ -63,7 +63,6 @@ impl Component for HelpOverlayComponent {
             _ => ComponentEvent::Ignored,
         }
     }
-
 }
 
 /// Full-width modal help card. Kept within 58 columns so nothing wraps on the
