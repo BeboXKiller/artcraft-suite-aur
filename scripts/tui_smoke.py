@@ -147,7 +147,7 @@ send("\x1b[D")  # Left: collapse it again
 pump(0.4, "collapsed")
 send("?")
 pump(0.4, "help")
-send("jjjjjjjjjj")  # scroll the help overlay to its end (offset clamps)
+send("j" * 20)  # scroll the help overlay to its end (offset clamps)
 pump(0.4, "help_scrolled")
 send("\x1b")
 pump(0.4, "help_closed")
