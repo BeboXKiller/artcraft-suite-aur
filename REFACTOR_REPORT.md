@@ -223,3 +223,23 @@ signature changed. Producers: `scan_pipeline` (app.rs:850) and
 - `cargo clippy --all-features --all-targets` 0 warnings
 - `cargo test` 101/101
 - `python3 scripts/tui_smoke.py` exit 0
+
+## 9. Phase 2 progress log (refactor execution)
+
+Steps land one commit each, checklist green every time (`cargo fmt`,
+`cargo clippy --all-features --all-targets -- -D warnings`, `cargo test`,
+`scripts/tui_smoke.py` exit 0, behavior-contract diff).
+
+| Step | Commit | What moved | Tests |
+|---|---|---|---|
+| 1 | `6e7ef3e` | `HelpOverlayComponent` (`components/help.rs`): open/scroll/toggle/handle_key/render; free `render_help_card` called from ui.rs during the transition | 5 moved |
+| 2 | `e401b43` | `UninstallConfirmComponent` (`components/uninstall.rs`): targets, pending, open, cancel rule, render | 3 moved |
+| 3 | `a6ed099` | `JobsPopupComponent` (`components/jobs.rs`): open/scratch/open_with/limit/handle_key/render; `ComponentEvent::JobsApply` added | 4 moved |
+| 4a | `5d9f91a` | `ListComponent` state + row math (`components/list.rs`); App field collapse to `list: ListComponent` | 6 added |
+| 4b | `df33a11` | List rendering: `render(TaskView)`, `row_state`, `behind_*`, `pad`, `clip` out of ui.rs | 1 moved |
+| 4c | `94ade44` | `pick_one`/`pick_toggle` into ListComponent returning `Msg`; plan amended (`enter*` stays on App) | 2 added |
+| 5 | (this commit) | `TaskManager` (`task/mod.rs`): `busy`/`progress`/`pending`/`failed`/`max_parallel` + `is_staged`/`has_slot`/`finish`; job consts move here (re-exported from app). `try_start`/`start_now`/`pump` stay on App, delegating (need dirs/track/tx) — plan amended | 4 added; 113 total |
+
+Notes: tests grew 101 → 113 with net-zero assertion change (unit tests for the
+new home of each pure function). ui.rs is still the layout coordinator;
+`App::render` and deletion of `ui.rs` are the final step (8).

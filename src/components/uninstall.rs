@@ -166,7 +166,10 @@ mod tests {
             "engine error must surface: {}",
             app.msg
         );
-        assert!(app.failed.contains_key("a"), "failed row must be marked");
+        assert!(
+            app.tasks.failed.contains_key("a"),
+            "failed row must be marked"
+        );
     }
 
     #[test]
@@ -174,12 +177,15 @@ mod tests {
         let mut v = apps(3);
         v[0].installed = true;
         let mut app = App::with_apps(v);
-        app.busy.insert("a".into(), "updating".into());
+        app.tasks.busy.insert("a".into(), "updating".into());
         app.list.sel = 0;
         app.on_key(key(KeyCode::Char('d')));
         assert!(!app.uninstall.pending(), "nothing eligible must not ask");
         assert_eq!(app.msg, "nothing to uninstall (1 skipped)");
-        assert_eq!(app.busy["a"], "updating", "busy row must stay untouched");
+        assert_eq!(
+            app.tasks.busy["a"], "updating",
+            "busy row must stay untouched"
+        );
     }
 
     #[test]

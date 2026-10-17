@@ -128,10 +128,10 @@ mod tests {
 
     /// Fill every runner slot so no key press can spawn real work.
     fn saturate(app: &mut App) {
-        for i in 0..app.max_parallel {
-            app.busy.insert(format!("z{i}"), "installing".into());
+        for i in 0..app.tasks.max_parallel {
+            app.tasks.busy.insert(format!("z{i}"), "installing".into());
         }
-        assert_eq!(app.busy.len(), app.max_parallel);
+        assert_eq!(app.tasks.busy.len(), app.tasks.max_parallel);
     }
 
     #[test]
@@ -140,15 +140,15 @@ mod tests {
         app.on_key(key(KeyCode::Char('p')));
         assert!(app.jobs.open, "p must open the popup");
         assert_eq!(
-            app.jobs.scratch, app.max_parallel,
+            app.jobs.scratch, app.tasks.max_parallel,
             "scratch starts at the current limit"
         );
         app.on_key(key(KeyCode::Up));
         app.on_key(key(KeyCode::Char('+')));
-        assert_eq!(app.jobs.scratch, app.max_parallel + 2);
+        assert_eq!(app.jobs.scratch, app.tasks.max_parallel + 2);
         app.on_key(key(KeyCode::Enter));
         assert!(!app.jobs.open, "Enter must close the popup");
-        assert_eq!(app.max_parallel, 4);
+        assert_eq!(app.tasks.max_parallel, 4);
         assert_eq!(app.msg, "parallel builds: 4");
     }
 
@@ -156,12 +156,16 @@ mod tests {
     fn raising_the_limit_promotes_queued_work_immediately() {
         let mut app = App::with_apps(apps(3));
         saturate(&mut app);
-        app.pending.push_back(("c".into(), Action::Install));
+        app.tasks.pending.push_back(("c".into(), Action::Install));
         app.on_key(key(KeyCode::Char('p')));
         app.on_key(key(KeyCode::Up)); // 3
         app.on_key(key(KeyCode::Enter));
-        assert_eq!(app.busy.len(), 3, "the queued task must start at once");
-        assert!(app.pending.is_empty(), "the queue must be drained");
+        assert_eq!(
+            app.tasks.busy.len(),
+            3,
+            "the queued task must start at once"
+        );
+        assert!(app.tasks.pending.is_empty(), "the queue must be drained");
     }
 
     #[test]
@@ -180,7 +184,7 @@ mod tests {
         app.on_key(key(KeyCode::Esc));
         assert!(!app.jobs.open);
         assert_eq!(
-            app.max_parallel, DEFAULT_MAX_PARALLEL,
+            app.tasks.max_parallel, DEFAULT_MAX_PARALLEL,
             "Esc keeps the old limit"
         );
         assert_eq!(app.msg, "parallel builds unchanged");

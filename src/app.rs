@@ -1,6 +1,5 @@
 //! Application state: selection, background tasks, key handling.
 
-use std::collections::{HashMap, VecDeque};
 #[cfg(test)]
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
@@ -12,14 +11,11 @@ use crate::components::{
     UninstallConfirmComponent,
 };
 use crate::engine::{self, Action, AppInfo, Ev, Track};
+use crate::task::TaskManager;
 use crate::theme::Palette;
 
-/// How many apps may compile at once unless the user says otherwise
-/// (`-p` on the CLI, `ARTCRAFT_PARALLEL`, or the `p` popup in the UI).
-pub const DEFAULT_MAX_PARALLEL: usize = 2;
-/// Smallest and largest accepted parallel-build limit.
-pub const MIN_JOBS: usize = 1;
-pub const MAX_JOBS: usize = 16;
+pub use crate::task::{DEFAULT_MAX_PARALLEL, MAX_JOBS, MIN_JOBS};
+
 /// Rows a PageUp/PageDown jumps; close to a typical list viewport height.
 const PAGE: usize = 10;
 /// Bytes of build log cached for the tail pane.
@@ -62,12 +58,8 @@ fn compact_progress(p: &engine::Progress) -> Option<String> {
 pub struct App {
     /// suite rows, highlight, picks and the attention filter
     pub list: ListComponent,
-    pub busy: HashMap<String, String>,
-    /// repo → live build progress, while a build reports it
-    pub progress: HashMap<String, engine::Progress>,
-    pub pending: VecDeque<(String, Action)>,
-    /// repo → error of the last failed task, until a retry clears it
-    pub failed: HashMap<String, String>,
+    /// running/queued/failed tasks and their live progress
+    pub tasks: TaskManager,
     /// commits (default) or releases — what "behind" counts; `t` toggles
     pub track: Track,
     pub msg: String,
@@ -80,8 +72,6 @@ pub struct App {
     confirm_quit: bool,
     /// pending `d` uninstall: target indices awaiting a `y` confirmation
     pub uninstall: UninstallConfirmComponent,
-    /// how many apps may compile at once (see [`Self::try_start`])
-    pub max_parallel: usize,
     /// `p` popup: editor state for the parallel-build limit
     pub jobs: JobsPopupComponent,
     /// Tail of the selected repo's log, refreshed by [`Self::refresh_log`].
@@ -95,13 +85,9 @@ pub struct App {
 
 impl App {
     pub fn new(tx: Sender<Ev>, max_parallel: usize, track: Track) -> Self {
-        let max_parallel = max_parallel.clamp(MIN_JOBS, MAX_JOBS);
         let mut app = Self {
             list: ListComponent::default(),
-            busy: HashMap::new(),
-            progress: HashMap::new(),
-            pending: VecDeque::new(),
-            failed: HashMap::new(),
+            tasks: TaskManager::new(max_parallel),
             track,
             msg: "scanning…".into(),
             quit: false,
@@ -109,7 +95,6 @@ impl App {
             palette: Palette::detect(),
             confirm_quit: false,
             uninstall: UninstallConfirmComponent::default(),
-            max_parallel,
             jobs: JobsPopupComponent::default(),
             log: Vec::new(),
             log_repo: "",
@@ -134,26 +119,14 @@ impl App {
                     action,
                     result,
                 } => {
-                    self.busy.remove(&repo);
-                    self.progress.remove(&repo);
-                    let text = match result {
-                        Ok(m) => {
-                            self.failed.remove(&repo);
-                            format!("✓ {m}")
-                        }
-                        Err(e) => {
-                            self.failed.insert(repo.clone(), e.clone());
-                            format!("✗ {repo} · {}: {e}", action.label())
-                        }
-                    };
-                    self.msg = text;
+                    self.msg = self.tasks.finish(&repo, action.label(), &result);
                     if let Some(idx) = self.list.apps.iter().position(|a| a.repo == repo) {
                         self.rescan_at(idx);
                     }
                     self.pump();
                 }
                 Ev::Progress { repo, progress } => {
-                    self.progress.insert(repo, progress);
+                    self.tasks.progress.insert(repo, progress);
                 }
                 Ev::Scanned { index, info } => {
                     // the suite order is fixed, but guard against a stale index anyway
@@ -211,24 +184,24 @@ impl App {
     /// The highlighted row's live build progress, if it's building.
     pub fn selected_progress(&self) -> Option<&engine::Progress> {
         let repo = self.list.apps.get(self.list.sel)?.repo;
-        self.progress.get(repo)
+        self.tasks.progress.get(repo)
     }
 
     pub fn status_line(&self) -> (String, Tone) {
         let mut parts = Vec::new();
-        if let Some(s) = engine::busy_summary(&self.busy) {
+        if let Some(s) = engine::busy_summary(&self.tasks.busy) {
             let mut s = s;
             // A single running task earns a compact "~2m · 54%"; parallel
             // builds would crowd the row, so they keep the plain verb list.
-            if self.busy.len() == 1
+            if self.tasks.busy.len() == 1
                 && let Some(extra) = self.selected_progress().and_then(compact_progress)
             {
                 s.push_str(&format!(" {extra}"));
             }
             parts.push(s);
         }
-        if !self.pending.is_empty() {
-            parts.push(format!("{} queued", self.pending.len()));
+        if !self.tasks.pending.is_empty() {
+            parts.push(format!("{} queued", self.tasks.pending.len()));
         }
         if !parts.is_empty() {
             return (parts.join(" · "), Tone::Busy);
@@ -244,14 +217,14 @@ impl App {
     }
 
     fn try_start(&mut self, repo: String, action: Action) {
-        if self.busy.contains_key(&repo) || self.pending.iter().any(|(r, _)| *r == repo) {
+        if self.tasks.is_staged(&repo) {
             return;
         }
-        if self.busy.len() >= self.max_parallel {
-            self.pending.push_back((repo, action));
+        if !self.tasks.has_slot() {
+            self.tasks.pending.push_back((repo, action));
             return;
         }
-        self.failed.remove(&repo);
+        self.tasks.failed.remove(&repo);
         self.start_now(repo, action);
     }
 
@@ -266,17 +239,17 @@ impl App {
         else {
             return;
         };
-        self.busy.insert(repo.clone(), action.label().into());
+        self.tasks.busy.insert(repo.clone(), action.label().into());
         engine::spawn(repo, dir, action, self.track, self.tx.clone());
     }
 
     fn pump(&mut self) {
-        while let Some((repo, action)) = self.pending.pop_front() {
-            if self.busy.contains_key(&repo) || self.busy.len() >= self.max_parallel {
-                self.pending.push_front((repo, action));
+        while let Some((repo, action)) = self.tasks.pending.pop_front() {
+            if self.tasks.busy.contains_key(&repo) || !self.tasks.has_slot() {
+                self.tasks.pending.push_front((repo, action));
                 break;
             }
-            self.failed.remove(&repo);
+            self.tasks.failed.remove(&repo);
             self.start_now(repo, action);
         }
     }
@@ -374,7 +347,7 @@ impl App {
             Char('x') | Delete => self.cancel_selected(),
             Char('d') => self.uninstall_selected(),
             Char('p') => {
-                self.jobs.open_with(self.max_parallel);
+                self.jobs.open_with(self.tasks.max_parallel);
             }
             Char('y') => {
                 if let Some(targets) = self.uninstall.targets.take() {
@@ -389,11 +362,11 @@ impl App {
                     .filter(|a| a.cloned)
                     .map(|a| a.repo.to_string())
                     .collect();
-                let before = self.busy.len() + self.pending.len();
+                let before = self.tasks.busy.len() + self.tasks.pending.len();
                 for repo in repos {
                     self.try_start(repo, Action::Update);
                 }
-                self.msg = if self.busy.len() + self.pending.len() > before {
+                self.msg = if self.tasks.busy.len() + self.tasks.pending.len() > before {
                     "update queued".into()
                 } else {
                     "nothing to update".into()
@@ -407,11 +380,11 @@ impl App {
                     .filter(|a| !a.installed)
                     .map(|a| a.repo.to_string())
                     .collect();
-                let before = self.busy.len() + self.pending.len();
+                let before = self.tasks.busy.len() + self.tasks.pending.len();
                 for repo in repos {
                     self.try_start(repo, Action::Install);
                 }
-                self.msg = if self.busy.len() + self.pending.len() > before {
+                self.msg = if self.tasks.busy.len() + self.tasks.pending.len() > before {
                     "install queued".into()
                 } else {
                     "nothing to install".into()
@@ -458,21 +431,21 @@ impl App {
 
     /// Rows the list currently shows — see [`ListComponent::visible_rows`].
     pub fn visible_rows(&self) -> Vec<usize> {
-        self.list.visible_rows(&self.failed)
+        self.list.visible_rows(&self.tasks.failed)
     }
 
     /// Step the highlight by `step` rows *within what is visible*.
     fn move_sel(&mut self, step: isize) {
-        self.list.move_sel(step, &self.failed);
+        self.list.move_sel(step, &self.tasks.failed);
     }
 
     /// Keep the highlight on a row the list is actually showing.
     fn clamp_selection(&mut self) {
-        self.list.clamp_selection(&self.failed);
+        self.list.clamp_selection(&self.tasks.failed);
     }
 
     fn request_quit(&mut self) {
-        let running = self.busy.len() + self.pending.len();
+        let running = self.tasks.busy.len() + self.tasks.pending.len();
         if running > 0 && !self.confirm_quit {
             self.confirm_quit = true;
             self.msg = format!(
@@ -507,7 +480,7 @@ impl App {
     }
 
     fn is_staged(&self, repo: &str) -> bool {
-        self.busy.contains_key(repo) || self.pending.iter().any(|(r, _)| r == repo)
+        self.tasks.is_staged(repo)
     }
 
     fn cancel_selected(&mut self) {
@@ -523,14 +496,14 @@ impl App {
             let Some(repo) = self.list.apps.get(*i).map(|a| a.repo) else {
                 continue;
             };
-            if self.busy.contains_key(repo) {
+            if self.tasks.busy.contains_key(repo) {
                 if engine::cancel(repo) {
                     cancelling += 1;
                 } else {
                     finished += 1;
                 }
-            } else if let Some(pos) = self.pending.iter().position(|(r, _)| r == repo) {
-                self.pending.remove(pos);
+            } else if let Some(pos) = self.tasks.pending.iter().position(|(r, _)| r == repo) {
+                self.tasks.pending.remove(pos);
                 dequeued += 1;
             } else {
                 idle += 1;
@@ -567,8 +540,8 @@ impl App {
     /// `Enter` in the `p` popup: adopt the new limit and start any queued
     /// work the raised cap now allows. The popup already closed itself.
     fn jobs_apply(&mut self) {
-        self.max_parallel = self.jobs.limit();
-        self.msg = format!("parallel builds: {}", self.max_parallel);
+        self.tasks.max_parallel = self.jobs.limit();
+        self.msg = format!("parallel builds: {}", self.tasks.max_parallel);
         self.pump();
     }
 
@@ -623,7 +596,7 @@ impl App {
                 Ok(msg) => {
                     removed += 1;
                     last_msg = msg;
-                    self.failed.remove(&repo);
+                    self.tasks.failed.remove(&repo);
                     self.rescan_at(i);
                 }
                 Err(e) => {
@@ -637,7 +610,7 @@ impl App {
         } else if removed == 0 {
             match last_err {
                 Some((repo, e)) => {
-                    self.failed.insert(repo.clone(), e.clone());
+                    self.tasks.failed.insert(repo.clone(), e.clone());
                     format!("{repo} · {e}")
                 }
                 None => format!("nothing to uninstall ({skipped} skipped)"),
@@ -648,7 +621,7 @@ impl App {
                 parts.push(format!("{skipped} skipped"));
             }
             if let Some((repo, e)) = last_err {
-                self.failed.insert(repo.clone(), e.clone());
+                self.tasks.failed.insert(repo.clone(), e.clone());
                 parts.push(format!("{repo} · {e}"));
             }
             parts.join(" · ")
@@ -671,11 +644,11 @@ impl App {
         let repo = a.repo;
         let installed = a.installed;
         let pkg = a.pkg.clone();
-        if self.busy.contains_key(repo) {
-            self.msg = format!("{} already running for {repo}", self.busy[repo]);
+        if self.tasks.busy.contains_key(repo) {
+            self.msg = format!("{} already running for {repo}", self.tasks.busy[repo]);
             return;
         }
-        if self.pending.iter().any(|(r, _)| r == repo) {
+        if self.tasks.pending.iter().any(|(r, _)| r == repo) {
             self.msg = format!("{repo} is queued — wait, or press x to dequeue");
             return;
         }
@@ -693,7 +666,7 @@ impl App {
     /// Enter on a multi-pick: install what's missing, skip what's installed.
     /// Launching a pile of GUI apps would surprise the user and stall the UI.
     fn enter_many(&mut self, targets: &[usize]) {
-        let before = self.busy.len() + self.pending.len();
+        let before = self.tasks.busy.len() + self.tasks.pending.len();
         let mut installed = 0usize;
         for i in targets {
             let Some((is_installed, repo)) = self
@@ -713,7 +686,7 @@ impl App {
             }
             self.try_start(repo, Action::Install);
         }
-        let queued = (self.busy.len() + self.pending.len()).saturating_sub(before);
+        let queued = (self.tasks.busy.len() + self.tasks.pending.len()).saturating_sub(before);
         self.msg = match (queued, installed) {
             (0, n) if n == targets.len() => format!("all {n} already installed"),
             (0, _) => "already queued or installed".into(),
@@ -730,24 +703,24 @@ impl App {
             return;
         }
         let targets = self.targets();
-        let before = self.busy.len() + self.pending.len();
+        let before = self.tasks.busy.len() + self.tasks.pending.len();
         // a single target that was already running before we touched it
         let was_running = (targets.len() == 1)
             .then(|| self.row_label(targets[0]))
-            .is_some_and(|repo| self.busy.contains_key(&repo));
+            .is_some_and(|repo| self.tasks.busy.contains_key(&repo));
         for i in &targets {
             let Some(repo) = self.list.apps.get(*i).map(|a| a.repo.to_string()) else {
                 continue;
             };
             self.try_start(repo, action);
         }
-        let added = (self.busy.len() + self.pending.len()).saturating_sub(before);
+        let added = (self.tasks.busy.len() + self.tasks.pending.len()).saturating_sub(before);
         self.msg = if targets.len() == 1 {
             let repo = self.row_label(targets[0]);
-            if self.busy.contains_key(&repo) && !was_running {
+            if self.tasks.busy.contains_key(&repo) && !was_running {
                 format!("{} {repo}", action.label())
-            } else if self.busy.contains_key(&repo) {
-                format!("{} already running for {repo}", self.busy[&repo])
+            } else if self.tasks.busy.contains_key(&repo) {
+                format!("{} already running for {repo}", self.tasks.busy[&repo])
             } else {
                 format!("{repo} queued")
             }
@@ -804,10 +777,7 @@ impl App {
                 apps,
                 ..ListComponent::default()
             },
-            busy: HashMap::new(),
-            progress: HashMap::new(),
-            pending: VecDeque::new(),
-            failed: HashMap::new(),
+            tasks: TaskManager::new(DEFAULT_MAX_PARALLEL),
             track: Track::Commits,
             msg: "ready".into(),
             quit: false,
@@ -815,7 +785,6 @@ impl App {
             palette: Palette::of(crate::theme::Depth::TrueColor),
             confirm_quit: false,
             uninstall: UninstallConfirmComponent::default(),
-            max_parallel: DEFAULT_MAX_PARALLEL,
             jobs: JobsPopupComponent {
                 open: false,
                 scratch: DEFAULT_MAX_PARALLEL,
@@ -894,7 +863,7 @@ mod tests {
         let mut app = App::with_apps(apps(3));
         app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
         assert!(!app.quit, "Ctrl+A must not install everything");
-        assert!(app.pending.is_empty() && app.busy.is_empty());
+        assert!(app.tasks.pending.is_empty() && app.tasks.busy.is_empty());
         app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(app.quit, "Ctrl+C must quit");
     }
@@ -939,7 +908,7 @@ mod tests {
     #[test]
     fn quit_asks_for_confirmation_while_tasks_run() {
         let mut app = App::with_apps(apps(3));
-        app.busy.insert("a".into(), "installing".into());
+        app.tasks.busy.insert("a".into(), "installing".into());
         app.on_key(key(KeyCode::Char('q')));
         assert!(!app.quit, "first q must only warn");
         assert!(app.msg.contains("still running"));
@@ -950,9 +919,9 @@ mod tests {
     #[test]
     fn queued_task_can_be_dequeued() {
         let mut app = App::with_apps(apps(3));
-        app.pending.push_back(("a".into(), Action::Install));
+        app.tasks.pending.push_back(("a".into(), Action::Install));
         app.on_key(key(KeyCode::Char('x')));
-        assert!(app.pending.is_empty());
+        assert!(app.tasks.pending.is_empty());
         assert!(app.msg.contains("dequeued"));
     }
 
@@ -962,10 +931,10 @@ mod tests {
 
     /// Fill every runner slot so no key press can spawn real work.
     fn saturate(app: &mut App) {
-        for i in 0..app.max_parallel {
-            app.busy.insert(format!("z{i}"), "installing".into());
+        for i in 0..app.tasks.max_parallel {
+            app.tasks.busy.insert(format!("z{i}"), "installing".into());
         }
-        assert_eq!(app.busy.len(), app.max_parallel);
+        assert_eq!(app.tasks.busy.len(), app.tasks.max_parallel);
     }
 
     #[test]
@@ -999,7 +968,8 @@ mod tests {
         app.list.picks = [1, 2].into_iter().collect();
         app.on_key(key(KeyCode::Char('u')));
         assert_eq!(
-            app.pending
+            app.tasks
+                .pending
                 .iter()
                 .map(|(r, _)| r.as_str())
                 .collect::<Vec<_>>(),
@@ -1017,7 +987,8 @@ mod tests {
         app.list.picks = [2].into_iter().collect();
         app.on_key(key(KeyCode::Char('i')));
         assert_eq!(
-            app.pending
+            app.tasks
+                .pending
                 .iter()
                 .map(|(r, _)| r.as_str())
                 .collect::<Vec<_>>(),
@@ -1029,13 +1000,14 @@ mod tests {
     #[test]
     fn cancel_only_touches_picked_rows() {
         let mut app = App::with_apps(apps(3));
-        app.pending.push_back(("a".into(), Action::Install));
-        app.pending.push_back(("b".into(), Action::Install));
-        app.pending.push_back(("c".into(), Action::Install));
+        app.tasks.pending.push_back(("a".into(), Action::Install));
+        app.tasks.pending.push_back(("b".into(), Action::Install));
+        app.tasks.pending.push_back(("c".into(), Action::Install));
         app.list.picks = [1, 2].into_iter().collect();
         app.on_key(key(KeyCode::Char('x')));
         assert_eq!(
-            app.pending
+            app.tasks
+                .pending
                 .iter()
                 .map(|(r, _)| r.as_str())
                 .collect::<Vec<_>>(),
@@ -1054,7 +1026,8 @@ mod tests {
         app.list.picks = [0, 1].into_iter().collect();
         app.on_key(key(KeyCode::Enter));
         assert_eq!(
-            app.pending
+            app.tasks
+                .pending
                 .iter()
                 .map(|(r, _)| r.as_str())
                 .collect::<Vec<_>>(),
@@ -1090,9 +1063,17 @@ mod tests {
     #[test]
     fn failed_tasks_count_as_needing_attention() {
         let mut app = App::with_apps(vec![one("a", true, true, Some(0))]);
-        assert!(!app.list.needs_attention(&app.list.apps[0], &app.failed));
-        app.failed.insert("a".into(), "cargo build failed".into());
-        assert!(app.list.needs_attention(&app.list.apps[0], &app.failed));
+        assert!(
+            !app.list
+                .needs_attention(&app.list.apps[0], &app.tasks.failed)
+        );
+        app.tasks
+            .failed
+            .insert("a".into(), "cargo build failed".into());
+        assert!(
+            app.list
+                .needs_attention(&app.list.apps[0], &app.tasks.failed)
+        );
         app.on_key(key(KeyCode::Char('o')));
         assert_eq!(app.visible_rows(), vec![0]);
     }
@@ -1121,7 +1102,7 @@ mod tests {
         assert_eq!(app.status_line().1, Tone::Good);
         app.msg = "✗ photocraft · installing: boom".into();
         assert_eq!(app.status_line().1, Tone::Bad);
-        app.pending.push_back(("a".into(), Action::Update));
+        app.tasks.pending.push_back(("a".into(), Action::Update));
         assert_eq!(app.status_line().1, Tone::Busy);
     }
 
@@ -1203,13 +1184,13 @@ mod tests {
         .expect("send");
         app.drain(&rx);
         assert_eq!(
-            app.progress.get("a").map(|p| (p.done, p.total)),
+            app.tasks.progress.get("a").map(|p| (p.done, p.total)),
             Some((10, 40))
         );
         assert_eq!(app.selected_progress().map(|p| p.total), Some(40));
 
         // The task finishing must not leave a stale percentage on screen.
-        app.busy.insert("a".into(), "building".into());
+        app.tasks.busy.insert("a".into(), "building".into());
         tx.send(Ev::Done {
             repo: "a".into(),
             action: Action::Install,
@@ -1218,7 +1199,7 @@ mod tests {
         .expect("send");
         app.drain(&rx);
         assert!(
-            !app.progress.contains_key("a"),
+            !app.tasks.progress.contains_key("a"),
             "progress must clear on Done"
         );
     }
@@ -1226,8 +1207,8 @@ mod tests {
     #[test]
     fn a_single_running_task_gets_a_compact_eta_on_the_status_row() {
         let mut app = App::with_apps(apps(1));
-        app.busy.insert("a".into(), "building".into());
-        app.progress.insert(
+        app.tasks.busy.insert("a".into(), "building".into());
+        app.tasks.progress.insert(
             "a".into(),
             engine::Progress {
                 done: 10,

@@ -71,9 +71,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
         main,
         s,
         crate::components::list::TaskView {
-            busy: &app.busy,
-            pending: &app.pending,
-            failed: &app.failed,
+            busy: &app.tasks.busy,
+            pending: &app.tasks.pending,
+            failed: &app.tasks.failed,
             track: app.track,
         },
     );
@@ -136,9 +136,9 @@ fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
     if app.track == Track::Releases {
         spans.push(Span::styled(" ⚑ releases ", s.fg(Tint::Accent)));
     }
-    if !app.busy.is_empty() {
+    if !app.tasks.busy.is_empty() {
         spans.push(Span::styled(
-            format!(" ⚙ {}/{} ", app.busy.len(), app.max_parallel),
+            format!(" ⚙ {}/{} ", app.tasks.busy.len(), app.tasks.max_parallel),
             s.fg(Tint::Accent),
         ));
     }
@@ -166,10 +166,10 @@ fn draw_details(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
 
 fn details_for<'a>(app: &App, a: &AppInfo, s: Sty, width: usize) -> (String, Vec<Line<'a>>) {
     let repo = a.repo;
-    if let Some(verb) = app.busy.get(repo) {
+    if let Some(verb) = app.tasks.busy.get(repo) {
         let title = format!(" {verb} — {repo} ");
         let mut lines = Vec::new();
-        if let Some(p) = app.progress.get(repo) {
+        if let Some(p) = app.tasks.progress.get(repo) {
             lines.push(progress_line(p, s, width));
         }
         lines.extend(tail_lines(
@@ -180,7 +180,7 @@ fn details_for<'a>(app: &App, a: &AppInfo, s: Sty, width: usize) -> (String, Vec
         ));
         return (title, lines);
     }
-    if let Some(err) = app.failed.get(repo) {
+    if let Some(err) = app.tasks.failed.get(repo) {
         let title = format!(" ✗ {repo} — build failed ");
         let mut lines = vec![Line::from(Span::styled(format!(" {err}"), s.fg(Tint::Bad)))];
         lines.extend(tail_lines(
@@ -799,7 +799,9 @@ mod tests {
     #[test]
     fn details_pane_shows_the_live_log_while_busy() {
         let mut a = app();
-        a.busy.insert("photocraft".into(), "installing".into());
+        a.tasks
+            .busy
+            .insert("photocraft".into(), "installing".into());
         a.log = vec!["   Compiling photocraft v0.5.0".into()];
         let rows = render(&a, 80, 24);
         let joined = rows.join("\n");
@@ -832,8 +834,8 @@ mod tests {
         // numbers, and the ETA is prefixed with `~` so it never reads as a
         // countdown.
         let mut a = app();
-        a.busy.insert("photocraft".into(), "building".into());
-        a.progress.insert(
+        a.tasks.busy.insert("photocraft".into(), "building".into());
+        a.tasks.progress.insert(
             "photocraft".into(),
             engine::Progress {
                 done: 43,
@@ -866,8 +868,8 @@ mod tests {
         // because the denominator was set equal to the count. A seeded build
         // must start at 0% with an empty bar and fill in from there.
         let mut a = app();
-        a.busy.insert("photocraft".into(), "building".into());
-        a.progress.insert(
+        a.tasks.busy.insert("photocraft".into(), "building".into());
+        a.tasks.progress.insert(
             "photocraft".into(),
             engine::Progress {
                 done: 0,
@@ -895,8 +897,8 @@ mod tests {
         // The denominator couldn't be obtained: there is no honest percentage,
         // so show elapsed time rather than a bar that would be a guess.
         let mut a = app();
-        a.busy.insert("photocraft".into(), "building".into());
-        a.progress.insert(
+        a.tasks.busy.insert("photocraft".into(), "building".into());
+        a.tasks.progress.insert(
             "photocraft".into(),
             engine::Progress {
                 done: 0,
@@ -1055,8 +1057,10 @@ mod tests {
     #[test]
     fn header_counts_running_builds_against_the_limit() {
         let mut a = app();
-        a.busy.insert("photocraft".into(), "installing".into());
-        a.max_parallel = 2;
+        a.tasks
+            .busy
+            .insert("photocraft".into(), "installing".into());
+        a.tasks.max_parallel = 2;
         let head = render(&a, 80, 24).join("\n");
         assert!(head.contains("⚙ 1/2"), "no parallel badge: {head:?}");
         let b = app();
