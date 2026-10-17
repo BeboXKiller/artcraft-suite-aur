@@ -8,6 +8,16 @@ approval, then proceed.
 
 ## 1. Keybindings by context
 
+### 1.0 Search line focused (after Ctrl chords; before `?` and every overlay)
+
+| Key | Behavior |
+|---|---|
+| printable char | append to the query — the list filters live |
+| Backspace | drop the last character |
+| Enter | unfocus the line, keep the query as a standing filter |
+| Esc | clear the query, unfocus, message "search cleared" |
+| anything else | ignored (typing never acts on the app) |
+
 ### 1.1 Ctrl chords (always processed first, even over open overlays)
 
 | Key | Behavior |
@@ -58,7 +68,9 @@ Any key that is not `q`/`Esc` clears `confirm_quit`.
 
 | Key | Behavior |
 |---|---|
-| q, Esc | `request_quit()` — first press with tasks running arms `confirm_quit` + warning message; second press quits; no tasks → quit immediately |
+| q | `request_quit()` — first press with tasks running arms `confirm_quit` + warning message; second press quits; no tasks → quit immediately |
+| Esc | as `q`, except with a standing search filter it clears the filter first ("search cleared") |
+| / | focus the search line (see 2.3) — live filter over the repo names |
 | Up, k | move selection −1 within the visible rows |
 | Down, j | move selection +1 within the visible rows |
 | PageUp, PageDown | move ±10 (clamped to visible rows) |
@@ -90,6 +102,8 @@ Any key that is not `q`/`Esc` clears `confirm_quit`.
 - Vertical layout: header 3 rows / list `Min(6)` / details 7 rows / key bar 3
   rows.
 - Overlay paint order: help < uninstall-confirm < jobs-popup (later = on top).
+- Mouse: the wheel moves the highlight one row per notch in normal mode;
+  overlays and the quit-confirm ignore it.
 
 ### 2.2 Header
 

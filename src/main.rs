@@ -209,7 +209,16 @@ fn run(parallel: usize, track: engine::Track) -> std::io::Result<()> {
     let (tx, rx) = mpsc::channel();
     let mut app = app::App::new(tx, parallel, track);
     let mut terminal = ratatui::try_init()?;
+    crossterm::execute!(std::io::stdout(), event::EnableMouseCapture)?;
+    // a panic must release the mouse as well as the screen: chain onto the
+    // restore hook try_init installed
+    let screen_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = crossterm::execute!(std::io::stdout(), event::DisableMouseCapture);
+        screen_hook(info);
+    }));
     let result = event_loop(&mut terminal, &mut app, &rx);
+    crossterm::execute!(std::io::stdout(), event::DisableMouseCapture)?;
     ratatui::restore();
     result
 }
@@ -238,6 +247,17 @@ fn event_loop(
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     app.on_key(k);
                     dirty = true;
+                }
+                Event::Mouse(m) => {
+                    let delta = match m.kind {
+                        event::MouseEventKind::ScrollUp => Some(-1),
+                        event::MouseEventKind::ScrollDown => Some(1),
+                        _ => None,
+                    };
+                    if let Some(d) = delta {
+                        app.on_scroll(d);
+                        dirty = true;
+                    }
                 }
                 _ => {}
             }

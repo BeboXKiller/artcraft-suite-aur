@@ -536,6 +536,15 @@ impl App {
         self.list.move_sel(step, &self.tasks.failed);
     }
 
+    /// Mouse wheel in normal mode: one row per notch. Overlays keep the
+    /// wheel to themselves (the help scrolls with j/k only, today).
+    pub fn on_scroll(&mut self, delta: isize) {
+        if self.help.open || self.jobs.open || self.uninstall.pending() || self.confirm_quit {
+            return;
+        }
+        self.move_sel(delta);
+    }
+
     /// Keep the highlight on a row the list is actually showing.
     fn clamp_selection(&mut self) {
         self.list.clamp_selection(&self.tasks.failed);
@@ -1407,6 +1416,28 @@ mod tests {
         tx.send(Ev::Checked).expect("send");
         assert!(app.drain(&rx), "an arrived event is a change");
         assert!(!app.drain(&rx), "drained once: quiet again");
+    }
+
+    #[test]
+    fn mouse_wheel_moves_the_highlight_in_normal_mode_only() {
+        let mut a = App::with_apps(apps(3));
+        a.on_scroll(1);
+        assert_eq!(a.list.sel, 1, "wheel down moves one row");
+        a.on_scroll(-1);
+        assert_eq!(a.list.sel, 0, "wheel up moves back");
+        a.on_scroll(9);
+        assert_eq!(a.list.sel, 2, "clamped at the last visible row");
+
+        a.help.open = true;
+        a.on_scroll(-1);
+        assert_eq!(
+            a.list.sel, 2,
+            "the wheel must not move the list under an overlay"
+        );
+        a.help.open = false;
+        a.confirm_quit = true;
+        a.on_scroll(-1);
+        assert_eq!(a.list.sel, 2, "nor while quit is asking for confirmation");
     }
 
     #[test]
