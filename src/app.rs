@@ -977,6 +977,20 @@ mod tests {
     }
 
     #[test]
+    fn list_shows_pinned_column_labels() {
+        let rows = render(&App::with_apps(apps(3)), 80, 24);
+        // list title is row 3; the labels sit on the first inner row
+        let head = &rows[4];
+        assert!(head.contains("app"), "repo label missing: {head:?}");
+        assert!(head.contains("state"), "status label missing: {head:?}");
+        assert!(head.contains("version"), "version label missing: {head:?}");
+        assert!(
+            !head.contains('□') && !head.contains('▶'),
+            "labels must not carry row marks: {head:?}"
+        );
+    }
+
+    #[test]
     fn empty_attention_filter_explains_itself_inside_the_list() {
         // every row up to date — the filter has nothing to keep
         let healthy = || {

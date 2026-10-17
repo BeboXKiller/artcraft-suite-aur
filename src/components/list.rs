@@ -9,10 +9,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use ratatui::Frame;
-use ratatui::layout::{Margin, Rect};
+use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, List, ListItem, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Block, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
 use crate::components::ComponentEvent;
@@ -230,19 +230,47 @@ impl ListComponent {
             title.push_str(" · attention only");
         }
         title.push(' ');
+
+        // Pinned column labels — they name the columns without scrolling
+        // away with the rows.
+        let faint = s.fg(Tint::Faint);
+        let mut hspans = vec![
+            Span::styled("   ", faint),
+            Span::styled("      ", faint),
+            Span::styled(pad("app", repo_w), faint),
+        ];
+        if show_version {
+            hspans.push(Span::styled(pad("version", version_w), faint));
+        }
+        hspans.push(Span::styled(" state", faint));
+
+        // The block is painted once; the labels take the first inner row and
+        // the rows fill the rest, so the labels never scroll.
+        let block = Block::bordered().title(title);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        frame.render_widget(
+            Paragraph::new(Line::from(hspans)),
+            Rect { height: 1, ..inner },
+        );
+        let rows_rect = Rect {
+            y: inner.y + 1,
+            height: inner.height.saturating_sub(1),
+            ..inner
+        };
+
         let item_count = items.len();
         let list = List::new(items)
-            .block(Block::bordered().title(title))
             .highlight_style(s.hl())
             .highlight_symbol("▶ ");
         let mut state = ListState::default();
         state.select(sel_pos);
-        frame.render_stateful_widget(list, area, &mut state);
+        frame.render_stateful_widget(list, rows_rect, &mut state);
 
         // The row window is smaller than the list — a thumb on the right
         // border shows where the viewport sits. Only on overflow: a thumb on
         // a short list would promise scrolling that does nothing.
-        let viewport = usize::from(area.height.saturating_sub(2));
+        let viewport = usize::from(rows_rect.height);
         if item_count > viewport && viewport > 0 {
             let mut bar = ScrollbarState::new(item_count).position(sel_pos.unwrap_or(0));
             frame.render_stateful_widget(
@@ -252,10 +280,12 @@ impl ListComponent {
                     .begin_symbol(None)
                     .end_symbol(None)
                     .style(s.fg(Tint::Faint)),
-                area.inner(Margin {
-                    vertical: 1,
-                    horizontal: 0,
-                }),
+                Rect {
+                    x: area.right().saturating_sub(1),
+                    y: rows_rect.y,
+                    width: 1,
+                    height: rows_rect.height,
+                },
                 &mut bar,
             );
         }

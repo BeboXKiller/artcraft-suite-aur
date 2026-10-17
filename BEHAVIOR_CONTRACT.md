@@ -105,6 +105,8 @@ Any key that is not `q`/`Esc` clears `confirm_quit`.
 - Title: ` Apps (n) · k picked · attention only ` (suffix parts conditional).
 - Columns: mark (3) + glyph (6) fixed, phrase reserve 22, repo + version share
   the remaining width; version column hides below 52 usable columns.
+- A faint column-header row (`app` / `version` / `state`) is pinned under the
+  title inside the block — it never scrolls with the rows.
 - Pick marks: `■` picked, `□` not picked.
 - Highlight: `▶ ` symbol, accent background, dark-ink-on-accent foreground.
 - Expanded rows push an indented description line below the row.
