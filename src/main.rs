@@ -219,15 +219,28 @@ fn event_loop(
     app: &mut app::App,
     rx: &mpsc::Receiver<engine::Ev>,
 ) -> std::io::Result<()> {
+    use std::time::Instant;
+    // redraw on change, not on a fixed frame rate: a key, a background
+    // event, or (while a build runs) the once-a-second ETA/elapsed text
+    let mut dirty = true;
+    let mut last_draw = Instant::now();
     loop {
-        app.drain(rx);
+        let changed = app.drain(rx);
         app.refresh_log();
-        terminal.draw(|f| app.render(f))?;
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(k) = event::read()?
-            && k.kind == KeyEventKind::Press
-        {
-            app.on_key(k);
+        let busy = !app.tasks.busy.is_empty();
+        if dirty || changed || (busy && last_draw.elapsed() >= Duration::from_secs(1)) {
+            terminal.draw(|f| app.render(f))?;
+            dirty = false;
+            last_draw = Instant::now();
+        }
+        if event::poll(Duration::from_millis(100))? {
+            match event::read()? {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    app.on_key(k);
+                    dirty = true;
+                }
+                _ => {}
+            }
         }
         if app.quit {
             return Ok(());

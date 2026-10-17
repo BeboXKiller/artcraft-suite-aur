@@ -120,8 +120,12 @@ impl App {
         app
     }
 
-    pub fn drain(&mut self, rx: &Receiver<Ev>) {
+    /// Fold every waiting background event into the state. Returns whether
+    /// anything arrived, so the main loop can skip a pointless redraw.
+    pub fn drain(&mut self, rx: &Receiver<Ev>) -> bool {
+        let mut changed = false;
         while let Ok(ev) = rx.try_recv() {
+            changed = true;
             match ev {
                 Ev::Done {
                     repo,
@@ -168,6 +172,7 @@ impl App {
         }
         // a rescan can take the highlighted row out of the attention filter
         self.clamp_selection();
+        changed
     }
 
     /// Cache the log tail for the selected repo.
@@ -1392,6 +1397,16 @@ mod tests {
         assert_eq!(app.status_line().1, Tone::Bad);
         app.tasks.pending.push_back(("a".into(), Action::Update));
         assert_eq!(app.status_line().1, Tone::Busy);
+    }
+
+    #[test]
+    fn drain_reports_whether_anything_arrived() {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::with_apps(apps(1));
+        assert!(!app.drain(&rx), "an empty channel is not a change");
+        tx.send(Ev::Checked).expect("send");
+        assert!(app.drain(&rx), "an arrived event is a change");
+        assert!(!app.drain(&rx), "drained once: quiet again");
     }
 
     #[test]
