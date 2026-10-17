@@ -1,15 +1,13 @@
-//! Layout and widgets: header, suite list, details pane, key bar, help overlay.
-//! The list, details, and overlay widgets live in `crate::components`; this
-//! module keeps the frame layout and the header/key-bar until step 8.
+//! Layout and widgets: the frame layout shell.
+//! The list, details, header, key bar, and overlays live in
+//! `crate::components`; this module keeps the frame layout until step 8.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::app::{App, Tone};
-use crate::engine::Track;
-use crate::theme::{Sty, Tint};
+use crate::app::App;
+use crate::theme::Sty;
 
 /// Smallest grid this layout is designed for; below it we show a polite message.
 const MIN_WIDTH: u16 = 60;
@@ -41,28 +39,19 @@ pub fn draw(frame: &mut Frame, app: &App) {
 
     let s = Sty::new(app.palette);
     let (status, tone) = app.status_line();
-    let tone_tint = match tone {
-        Tone::Busy => Tint::Accent,
-        Tone::Good => Tint::Good,
-        Tone::Bad => Tint::Bad,
-        Tone::Info => Tint::Muted,
-    };
-    let head_text = vec![
-        Line::from(vec![
-            Span::styled(" ArtCraft Suite", s.fg(Tint::Accent).bold()),
-            Span::styled(
-                " — install · update · launch the Craft suite",
-                s.fg(Tint::Muted),
-            ),
-        ]),
-        Line::from(vec![Span::raw(" "), Span::styled(status, s.fg(tone_tint))]),
-    ];
-    let mut head_block = Block::bordered().title(" ArtCraft Suite ");
-    let summary = summary(app, s);
-    if !summary.is_empty() {
-        head_block = head_block.title(Line::from(summary).right_aligned());
-    }
-    frame.render_widget(Paragraph::new(head_text).block(head_block), head);
+    app.header.render(
+        frame,
+        head,
+        s,
+        crate::components::header::HeaderView {
+            status: &status,
+            tone,
+            apps: &app.list.apps,
+            filter_attention: app.list.filter_attention,
+            track: app.track,
+            tasks: &app.tasks,
+        },
+    );
 
     app.list.render(
         frame,
@@ -83,10 +72,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         &app.tasks,
         app.track,
     );
-    frame.render_widget(
-        Paragraph::new(key_bar(s)).alignment(Alignment::Center),
-        keys_row,
-    );
+    app.keybar.render(frame, keys_row, s);
 
     if app.help.open {
         crate::components::help::render_help_card(frame, area, s, app.help.scroll);
@@ -95,114 +81,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     app.jobs.render(frame, area, s);
 }
 
-/// Right-aligned header counters: how much is current, behind, or missing.
-fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
-    if app.list.apps.is_empty() {
-        return Vec::new();
-    }
-    let behind = app
-        .list
-        .apps
-        .iter()
-        .filter(|a| a.behind.is_some_and(|n| n > 0))
-        .count();
-    // nothing present at all: no clone *and* no installed binary — an app
-    // that is installed without its source is not "missing"
-    let missing = app
-        .list
-        .apps
-        .iter()
-        .filter(|a| !a.cloned && !a.installed)
-        .count();
-    let up = app
-        .list
-        .apps
-        .iter()
-        .filter(|a| a.installed && !a.stale && (a.behind == Some(0) || !a.cloned))
-        .count();
-    // clones whose upstream check hasn't landed — unknown, not "current"
-    let unchecked = app
-        .list
-        .apps
-        .iter()
-        .filter(|a| a.cloned && a.behind.is_none())
-        .count();
-    let mut spans = vec![
-        Span::styled(format!(" ✓ {up} "), s.fg(Tint::Good)),
-        Span::styled(format!(" ↑ {behind} "), s.fg(Tint::Warn)),
-        Span::styled(format!(" · {missing} "), s.fg(Tint::Faint)),
-    ];
-    if unchecked > 0 {
-        spans.push(Span::styled(format!(" ? {unchecked} "), s.fg(Tint::Muted)));
-    }
-    if app.list.filter_attention {
-        spans.push(Span::styled(" attention ", s.fg(Tint::Accent).bold()));
-    }
-    if app.track == Track::Releases {
-        spans.push(Span::styled(" ⚑ releases ", s.fg(Tint::Accent)));
-    }
-    if !app.tasks.busy.is_empty() {
-        spans.push(Span::styled(
-            format!(" ⚙ {}/{} ", app.tasks.busy.len(), app.tasks.max_parallel),
-            s.fg(Tint::Accent),
-        ));
-    }
-    spans
-}
-
-fn key_bar(s: Sty) -> Vec<Line<'static>> {
-    let c = s.fg(Tint::Accent);
-    vec![
-        Line::from(vec![
-            Span::styled("[Space]", c),
-            Span::raw(" pick  "),
-            Span::styled("[Ctrl+Space]", c),
-            Span::raw(" pick more  "),
-            Span::styled("[Enter]", c),
-            Span::raw(" open  "),
-            Span::styled("[u]", c),
-            Span::raw(" update  "),
-            Span::styled("[o]", c),
-            Span::raw(" attention"),
-        ]),
-        Line::from(vec![
-            Span::styled("[j/k]", c),
-            Span::raw(" move  "),
-            Span::styled("[→]", c),
-            Span::raw(" details  "),
-            Span::styled("[←]", c),
-            Span::raw(" close  "),
-            Span::styled("[f]", c),
-            Span::raw(" fetch  "),
-            Span::styled("[x]", c),
-            Span::raw(" cancel  "),
-            Span::styled("[?]", c),
-            Span::raw(" help  "),
-            Span::styled("[q]", c),
-            Span::raw(" quit"),
-        ]),
-        Line::from(vec![
-            Span::styled("[U]", c),
-            Span::raw(" update all  "),
-            Span::styled("[a]", c),
-            Span::raw(" install all  "),
-            Span::styled("[d]", c),
-            Span::raw(" remove  "),
-            Span::styled("[p]", c),
-            Span::raw(" jobs  "),
-            Span::styled("[r]", c),
-            Span::raw(" rescan  "),
-            Span::styled("[t]", c),
-            Span::raw(" releases"),
-        ]),
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::App;
-    use crate::engine::AppInfo;
+    use crate::engine::{AppInfo, Track};
     use crate::theme::{Depth, Palette};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -270,69 +153,6 @@ mod tests {
                 "status row missing at {w}x{h}: {rows:?}"
             );
         }
-    }
-
-    #[test]
-    fn header_summarises_the_suite() {
-        let mut a = app();
-        a.list.apps.push(app_info("wordcraft", true, true, Some(3)));
-        a.list.apps.push(app_info("cadcraft", false, false, None));
-        let rows = render(&a, 80, 24);
-        let head = rows[0].clone();
-        assert!(head.contains("✓ 1"), "up-to-date count missing: {head:?}");
-        assert!(head.contains("↑ 1"), "behind count missing: {head:?}");
-        assert!(head.contains("· 1"), "missing count missing: {head:?}");
-    }
-
-    #[test]
-    fn key_bar_fits_80_columns() {
-        let rows = render(&app(), 80, 24);
-        let row1 = &rows[rows.len() - 3];
-        let row2 = &rows[rows.len() - 2];
-        let row3 = &rows[rows.len() - 1];
-        assert!(row1.contains("[Space] pick"), "pick hint missing: {row1:?}");
-        assert!(
-            row1.contains("[Ctrl+Space] pick more"),
-            "multi-pick hint missing: {row1:?}"
-        );
-        assert!(
-            row1.contains("[o] attention"),
-            "filter hint missing: {row1:?}"
-        );
-        assert!(
-            row1.trim_end().ends_with("attention"),
-            "row 1 was clipped at 80 columns: {row1:?}"
-        );
-        assert!(
-            row2.contains("[→] details"),
-            "expand hint missing: {row2:?}"
-        );
-        assert!(
-            row2.contains("[←] close"),
-            "collapse hint missing: {row2:?}"
-        );
-        assert!(row2.contains("[q] quit"), "quit hint missing: {row2:?}");
-        assert!(row2.trim_end().ends_with("quit"), "row 2 clipped: {row2:?}");
-        assert!(
-            row3.contains("[U] update all"),
-            "batch hint missing: {row3:?}"
-        );
-        assert!(
-            row3.contains("[a] install all"),
-            "install hint missing: {row3:?}"
-        );
-        assert!(
-            row3.contains("[d] remove"),
-            "uninstall hint missing: {row3:?}"
-        );
-        assert!(
-            row3.contains("[p] jobs"),
-            "parallel-builds hint missing: {row3:?}"
-        );
-        assert!(
-            row3.trim_end().ends_with("releases"),
-            "row 3 was clipped at 80 columns: {row3:?}"
-        );
     }
 
     #[test]
@@ -495,16 +315,6 @@ mod tests {
     }
 
     #[test]
-    fn releases_badge_shows_in_the_header_only_in_releases_mode() {
-        let mut a = app();
-        a.list.apps.push(app_info("wordcraft", true, true, Some(0)));
-        let head = render(&a, 80, 24)[0].clone();
-        assert!(!head.contains("releases"), "no badge expected: {head:?}");
-        a.track = Track::Releases;
-        let head = render(&a, 80, 24)[0].clone();
-        assert!(head.contains("⚑ releases"), "badge missing: {head:?}");
-    }
-    #[test]
     fn a_three_digit_behind_count_keeps_the_phrase_and_glyph_intact() {
         // At 3 digits "100 commits behind" is 18 chars and the glyph is
         // "↑99+" (4 chars). Both used to overflow their columns and clip the
@@ -663,22 +473,6 @@ mod tests {
         assert!(
             joined.contains("too small"),
             "no min-size message: {joined:?}"
-        );
-    }
-
-    #[test]
-    fn header_counts_running_builds_against_the_limit() {
-        let mut a = app();
-        a.tasks
-            .busy
-            .insert("photocraft".into(), "installing".into());
-        a.tasks.max_parallel = 2;
-        let head = render(&a, 80, 24).join("\n");
-        assert!(head.contains("⚙ 1/2"), "no parallel badge: {head:?}");
-        let b = app();
-        assert!(
-            !render(&b, 80, 24).join("\n").contains('⚙'),
-            "idle badge leaked"
         );
     }
 

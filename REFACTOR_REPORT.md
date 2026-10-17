@@ -239,7 +239,8 @@ Steps land one commit each, checklist green every time (`cargo fmt`,
 | 4b | `df33a11` | List rendering: `render(TaskView)`, `row_state`, `behind_*`, `pad`, `clip` out of ui.rs | 1 moved |
 | 4c | `94ade44` | `pick_one`/`pick_toggle` into ListComponent returning `Msg`; plan amended (`enter*` stays on App) | 2 added |
 | 5 | `bd24630` | `TaskManager` (`task/mod.rs`): `busy`/`progress`/`pending`/`failed`/`max_parallel` + `is_staged`/`has_slot`/`finish`; job consts move here (re-exported from app). `try_start`/`start_now`/`pump` stay on App, delegating (need dirs/track/tx) — plan amended | 4 added; 113 total |
-| 6 | (this commit) | `DetailsComponent` (`components/details.rs`): log cache (`refresh_log`), `draw_details`/`details_for`/`progress_line`/`tail_lines`/`short_dir`, `DETAIL_LINES`/`LOG_BYTES` out of ui.rs/app.rs; 7 tests moved + 1 new (`short_dir`) — plan amended (render takes `Option<&AppInfo>` + `&TaskManager` + `Track`) | 8; 114 total |
+| 7 | (this commit) | `HeaderComponent` (`components/header.rs`): header block + `summary` counters, fed by a `HeaderView` struct; `KeyBarComponent` (`components/keybar.rs`): `lines` + centered `render`. `App` keeps `status_line`. 4 tests moved (3 header + 1 key bar) — plan amended (file name `keybar.rs`, `HeaderView` data-as-struct) | 114 total |
+| 6 | `01eb55c` | `DetailsComponent` (`components/details.rs`): log cache (`refresh_log`), `draw_details`/`details_for`/`progress_line`/`tail_lines`/`short_dir`, `DETAIL_LINES`/`LOG_BYTES` out of ui.rs/app.rs; 7 tests moved + 1 new (`short_dir`) — plan amended (render takes `Option<&AppInfo>` + `&TaskManager` + `Track`) | 8; 114 total |
 
 Notes: tests grew 101 → 113 with net-zero assertion change (unit tests for the
 new home of each pure function). ui.rs is still the layout coordinator;

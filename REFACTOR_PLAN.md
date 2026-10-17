@@ -37,8 +37,8 @@ diffs against it.
 | `ListComponent` | `components/list.rs` | `apps`, `sel`, `picks`, `filter_attention`, `expanded` | `visible_rows`, `needs_attention`, `move_sel`, `clamp_selection`, `pick_one`, `pick_toggle`, `row_label`, `targets`, `draw_list`, `row_state`, `behind_*`, `pad`, `clip`. **Amended (step 4c):** `enter`/`enter_many` stay on `App` — they are task orchestration (launch, `try_start`, busy/queue math), not list state |
 | `TaskManager` | `task/mod.rs` | `busy`, `progress`, `pending`, `failed`, `max_parallel` (+ `DEFAULT_MAX_PARALLEL`/`MIN_JOBS`/`MAX_JOBS`, re-exported from `app`) | `is_staged`, `has_slot`, `finish` (Done-event bookkeeping). **Amended (step 5):** `try_start`/`start_now`/`pump` stay on `App` — they need the list's clone dirs, `track` and the event sender; they delegate to the TaskManager helpers. `cancel_selected` stays on `App` (needs list targets). `handle_background(Ev)` wiring deferred until the trait's consumers exist. `App` exposes the maps as `app.tasks.*`; thin `App::is_staged` wrapper kept |
 | `DetailsComponent` | `components/details.rs` | `log`, `log_repo`, `log_len` | `refresh_log`, `draw_details`, `details_for`, `progress_line`, `tail_lines`, `short_dir`. **Amended (step 6):** `render` takes `Option<&AppInfo>` + `&TaskManager` + `Track` (data as args); `App` keeps a thin `refresh_log` wrapper that picks the selected repo |
-| `HeaderComponent` | `components/header.rs` | — (read-only) | header block build, `summary` |
-| `KeyBarComponent` | `components/key_bar.rs` | — (read-only) | `key_bar` |
+| `HeaderComponent` | `components/header.rs` | — (read-only) | header block build, `summary`. **Amended (step 7):** render takes a `HeaderView` struct (`status`/`tone`/`apps`/`filter_attention`/`track`/`tasks`); `App` keeps `status_line` |
+| `KeyBarComponent` | `components/keybar.rs` | — (read-only) | `key_bar` as `lines(s)` + `render`. **Amended (step 7):** file named `keybar.rs` to match sibling module naming |
 
 Stays on `App` (coordinator): `msg`, `quit`, `confirm_quit`, `track`,
 `palette`, `scanning`, `tx`, `drain` (now delegating), `status_line`
@@ -149,7 +149,7 @@ pub struct App {
     list: ListComponent,
     details: DetailsComponent,
     header: HeaderComponent,
-    key_bar: KeyBarComponent,
+    keybar: KeyBarComponent,
     help: HelpOverlayComponent,
     uninstall: UninstallConfirmComponent,
     jobs: JobsPopupComponent,

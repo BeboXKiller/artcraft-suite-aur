@@ -13,13 +13,17 @@ use crate::engine::{Action, Ev};
 use crate::theme::Palette;
 
 pub mod details;
+pub mod header;
 pub mod help;
 pub mod jobs;
+pub mod keybar;
 pub mod list;
 pub mod uninstall;
 pub use details::DetailsComponent;
+pub use header::HeaderComponent;
 pub use help::HelpOverlayComponent;
 pub use jobs::JobsPopupComponent;
+pub use keybar::KeyBarComponent;
 pub use list::ListComponent;
 pub use uninstall::UninstallConfirmComponent;
 

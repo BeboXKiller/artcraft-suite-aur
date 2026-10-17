@@ -7,8 +7,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::components::{
-    Component, ComponentEvent, DetailsComponent, HelpOverlayComponent, JobsPopupComponent,
-    ListComponent, UninstallConfirmComponent,
+    Component, ComponentEvent, DetailsComponent, HeaderComponent, HelpOverlayComponent,
+    JobsPopupComponent, KeyBarComponent, ListComponent, UninstallConfirmComponent,
 };
 use crate::engine::{self, Action, AppInfo, Ev, Track};
 use crate::task::TaskManager;
@@ -74,6 +74,10 @@ pub struct App {
     pub jobs: JobsPopupComponent,
     /// The bottom pane's cached log tail and details content.
     pub details: DetailsComponent,
+    /// The top header block (stateless — paints status + counters).
+    pub header: HeaderComponent,
+    /// The bottom key legend (stateless).
+    pub keybar: KeyBarComponent,
     /// true until the first background scan delivers its rows
     scanning: bool,
     tx: Sender<Ev>,
@@ -93,6 +97,8 @@ impl App {
             uninstall: UninstallConfirmComponent::default(),
             jobs: JobsPopupComponent::default(),
             details: DetailsComponent::default(),
+            header: HeaderComponent,
+            keybar: KeyBarComponent,
             scanning: true,
             tx,
         };
@@ -774,6 +780,8 @@ impl App {
                 scratch: DEFAULT_MAX_PARALLEL,
             },
             details: DetailsComponent::default(),
+            header: HeaderComponent,
+            keybar: KeyBarComponent,
             scanning: false,
             tx,
         }
