@@ -9,9 +9,11 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Margin, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState};
+use ratatui::widgets::{
+    Block, List, ListItem, ListState, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 
 use crate::components::ComponentEvent;
 use crate::engine::{self, Action, AppInfo, Track};
@@ -219,6 +221,7 @@ impl ListComponent {
             title.push_str(" · attention only");
         }
         title.push(' ');
+        let item_count = items.len();
         let list = List::new(items)
             .block(Block::bordered().title(title))
             .highlight_style(s.hl())
@@ -226,6 +229,27 @@ impl ListComponent {
         let mut state = ListState::default();
         state.select(sel_pos);
         frame.render_stateful_widget(list, area, &mut state);
+
+        // The row window is smaller than the list — a thumb on the right
+        // border shows where the viewport sits. Only on overflow: a thumb on
+        // a short list would promise scrolling that does nothing.
+        let viewport = usize::from(area.height.saturating_sub(2));
+        if item_count > viewport && viewport > 0 {
+            let mut bar = ScrollbarState::new(item_count).position(sel_pos.unwrap_or(0));
+            frame.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .thumb_symbol("█")
+                    .track_symbol(None)
+                    .begin_symbol(None)
+                    .end_symbol(None)
+                    .style(s.fg(Tint::Faint)),
+                area.inner(Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut bar,
+            );
+        }
     }
 }
 

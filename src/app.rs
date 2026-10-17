@@ -953,6 +953,30 @@ mod tests {
     }
 
     #[test]
+    fn list_scrollbar_appears_only_when_rows_overflow_the_window() {
+        // 14 rows in an 8-row window at 80x24: the thumb must show where
+        // the viewport sits, or the hidden rows are invisible to the user.
+        let many = App::with_apps(
+            (0..14)
+                .map(|i| one(&format!("suitcraft{i:02}"), true, true, Some(0)))
+                .collect(),
+        );
+        let rows = render(&many, 80, 24);
+        assert!(
+            rows.iter().any(|r| r.contains('█')),
+            "no scroll thumb on an overflowing list"
+        );
+
+        // A short list must not promise scrolling that does nothing.
+        let few = App::with_apps(apps(3));
+        let rows = render(&few, 80, 24);
+        assert!(
+            !rows.iter().any(|r| r.contains('█')),
+            "scroll thumb leaked onto a short list"
+        );
+    }
+
+    #[test]
     fn selection_is_clamped() {
         let mut app = App::with_apps(apps(3));
         app.on_key(key(KeyCode::Up));
