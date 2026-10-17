@@ -176,7 +176,9 @@ fn unknown_arg(args: &[String]) -> Option<&str> {
 
 fn print_status() {
     for a in engine::scan() {
-        let state = if a.installed {
+        let state = if a.stale {
+            "stale"
+        } else if a.installed {
             "installed"
         } else if a.cloned {
             "cloned"

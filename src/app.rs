@@ -44,8 +44,9 @@ pub fn coarse_eta(secs: u64) -> String {
     }
 }
 
-/// One running task's compact suffix: elapsed while the total is still ramping
-/// in, then `~ETA · 54%`. `None` before any crate finishes (nothing to show).
+/// One running task's compact suffix: elapsed while the pace is still warming
+/// in, then `~ETA · 54%`. `None` before any real crate finishes (nothing to
+/// estimate from yet).
 fn compact_progress(p: &engine::Progress) -> Option<String> {
     let elapsed = coarse_eta(p.elapsed_secs());
     match (p.eta_secs(), p.pct()) {
@@ -495,11 +496,13 @@ impl App {
             .collect()
     }
 
-    /// Missing, behind upstream, unchecked, or failed — the rows `o` keeps.
+    /// Missing, behind upstream, unchecked, stale install, or failed — the
+    /// rows `o` keeps.
     pub fn needs_attention(&self, a: &AppInfo) -> bool {
         !a.installed
             || self.failed.contains_key(a.repo)
             || a.behind.is_some_and(|n| n > 0)
+            || a.stale
             || (a.cloned && a.behind.is_none())
     }
 
@@ -922,6 +925,7 @@ mod tests {
                 behind: None,
                 commits: Vec::new(),
                 menu: false,
+                stale: false,
             })
             .collect()
     }
@@ -938,6 +942,7 @@ mod tests {
             behind,
             commits: Vec::new(),
             menu: false,
+            stale: false,
         }
     }
 
@@ -1386,8 +1391,11 @@ mod tests {
         let started = Instant::now() - Duration::from_secs(20);
         let p = engine::Progress {
             done: 10,
+            seen: 10,
             total: 40,
             started,
+            pace_secs: None,
+            last_real: None,
         };
         tx.send(Ev::Progress {
             repo: "a".into(),
@@ -1424,8 +1432,12 @@ mod tests {
             "a".into(),
             engine::Progress {
                 done: 10,
+                seen: 10,
                 total: 40,
                 started: Instant::now() - Duration::from_secs(20),
+                // 30 unresolved × 10s per crate → ~5m, 10/40 → 25%.
+                pace_secs: Some(10.0),
+                last_real: Some(Instant::now()),
             },
         );
         let (line, tone) = app.status_line();

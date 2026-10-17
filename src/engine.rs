@@ -101,6 +101,11 @@ pub struct AppInfo {
     /// applications directory — registered by this tool, the launcher or an
     /// AUR package alike.
     pub menu: bool,
+    /// The installed binary was built from an older revision than the
+    /// clone's current HEAD: a pull moved the source on while a cancelled or
+    /// failed build left the previous binary in place. The clone is current,
+    /// the install is not — `u` rebuilds it.
+    pub stale: bool,
 }
 
 /// Measured build progress, from cargo's own `--message-format=json` output:
@@ -109,47 +114,96 @@ pub struct AppInfo {
 /// `total` is a real denominator computed *before* the build starts (see
 /// [`estimate_units`]): the exact unit count from the previous successful
 /// build, or a `cargo tree` estimate when there isn't one. It stays fixed for
-/// the whole build — `done` counts the crates that actually compile (non-
-/// `fresh`), so the percentage starts at zero and climbs crate by crate. When
-/// the denominator couldn't be obtained `total` is `0` and [`Self::pct`]
-/// returns `None` rather than reporting a wrong percentage.
+/// the whole build. Three counters keep the two numbers honest about each
+/// other: `done` counts the crates that actually compile (non-`fresh`),
+/// `seen` counts every artifact cargo emits (fresh included), and `total` is
+/// the expected unit count — so the percentage is `done` over the real work
+/// left (`done + total − seen`), starting at zero and reaching 99% exactly
+/// when the last unresolved unit resolves. When the denominator couldn't be
+/// obtained `total` is `0` and [`Self::pct`] returns `None` rather than
+/// reporting a wrong percentage.
 #[derive(Clone, Debug)]
 pub struct Progress {
     /// Crates compiled so far (non-`fresh` artifacts).
     pub done: u64,
-    /// Crates the build is expected to compile; fixed for the build, `0` when
+    /// Every artifact cargo emitted, fresh and compiled alike; the gap
+    /// `total − seen` is the work still unresolved (fresh crates resolve it
+    /// for free the moment they appear).
+    pub seen: u64,
+    /// Crates the build is expected to produce; fixed for the build, `0` when
     /// unknown (in which case the UI shows elapsed time, not a bar).
     pub total: u64,
-    /// When the build phase started, for the elapsed/remaining estimate.
+    /// When the build phase started, for the elapsed display.
     pub started: Instant,
+    /// Smoothed seconds per real work event (EWMA over non-`fresh` artifact
+    /// gaps and build-script runs) — `None` until two samples exist, so the
+    /// dead pre-build phase (index update, downloads) never seeds a guess.
+    /// Set only through [`Self::observe`].
+    pub pace_secs: Option<f64>,
+    /// When the previous real work event happened, for the next pace gap.
+    pub last_real: Option<Instant>,
 }
 
+/// EWMA weight of the newest gap: 0.3 keeps the estimate responsive to a
+/// slow crate without letting one outlier own the whole window.
+const PACE_ALPHA: f64 = 0.3;
+
 impl Progress {
+    /// Record a real-work event at `at` and fold its gap into the pace.
+    ///
+    /// Fresh artifacts deliberately never call this: they arrive in
+    /// millisecond bursts and would collapse the pace to "everything is
+    /// instant", which is exactly the lie this model exists to avoid.
+    pub fn observe(&mut self, at: Instant) {
+        if let Some(prev) = self.last_real {
+            let gap = at.saturating_duration_since(prev).as_secs_f64();
+            self.pace_secs = Some(match self.pace_secs {
+                Some(prev_pace) => PACE_ALPHA * gap + (1.0 - PACE_ALPHA) * prev_pace,
+                None => gap,
+            });
+        }
+        self.last_real = Some(at);
+    }
+
+    /// Units cargo has not resolved yet — the real work left.
+    pub fn unresolved(&self) -> u64 {
+        self.total.saturating_sub(self.seen)
+    }
+
     /// Percentage complete, or `None` while the total is still unknown.
     ///
-    /// Linear on crate count, not on time: crates are what actually get built.
+    /// Linear on real crates, not on time: `done / (done + unresolved)`.
+    /// Fresh crates shrink `unresolved` the instant they stream by, so a warm
+    /// build's bar starts at 0% and advances only for work actually done.
+    /// If the seed was too low and the counters exhaust it mid-build, the
+    /// bar holds at 99% — never 100% before the build reports `Done`
+    /// (`save_units` fixes the denominator on the next successful build).
     pub fn pct(&self) -> Option<u8> {
         if self.total == 0 {
             return None;
         }
-        let p = (self.done * 100 / self.total).min(100);
-        Some(p as u8)
+        let left = self.unresolved();
+        if left == 0 {
+            return Some(if self.done == 0 { 0 } else { 99 });
+        }
+        let p = self.done * 100 / (self.done + left);
+        Some(p.min(99) as u8)
     }
 
-    /// Seconds left, linearly extrapolated from crates done. `None` until
-    /// some real work has finished and a total is known — before that there's
-    /// nothing to extrapolate from.
+    /// Seconds left: unresolved units × the recent per-unit pace. `None`
+    /// until a pace exists (two real samples) or nothing is left — before
+    /// that there's nothing honest to extrapolate from, and the UI shows
+    /// elapsed time instead.
+    ///
+    /// The value only changes when a crate lands (events update the pace),
+    /// not on every tick, so it can't inflate through a slow crate and snap
+    /// back down afterwards.
     pub fn eta_secs(&self) -> Option<u64> {
-        if self.done == 0 || self.total == 0 || self.done >= self.total {
+        let pace = self.pace_secs?;
+        if self.total == 0 || self.unresolved() == 0 {
             return None;
         }
-        let elapsed = self.started.elapsed().as_secs_f64();
-        if elapsed <= 0.0 {
-            return None;
-        }
-        let rate = self.done as f64 / elapsed;
-        let remaining = (self.total - self.done) as f64 / rate;
-        Some(remaining.ceil() as u64)
+        Some((self.unresolved() as f64 * pace).ceil() as u64)
     }
 
     /// Seconds already spent, for the pre-percentage warm-up line.
@@ -165,7 +219,7 @@ pub enum Ev {
         action: Action,
         result: Result<String, String>,
     },
-    /// A build compiled one more crate; carries the live [`Progress`].
+    /// A build reported live progress; carries the latest [`Progress`].
     Progress { repo: String, progress: Progress },
     /// Fresh AppInfo for `apps[index]`, computed on a worker thread.
     Scanned { index: usize, info: AppInfo },
@@ -209,6 +263,25 @@ pub fn log_file(repo: &str) -> PathBuf {
 /// [`estimate_units`].
 fn units_file(repo: &str) -> PathBuf {
     log_dir().join(format!("{repo}.units"))
+}
+
+/// The HEAD revision an install was last built from — what makes a stale
+/// binary detectable after the clone moves on. Written by `build_install`,
+/// read by [`install_is_stale`].
+fn installed_rev_file(repo: &str) -> PathBuf {
+    log_dir().join(format!("{repo}.rev"))
+}
+
+fn installed_rev(repo: &str) -> Option<String> {
+    std::fs::read_to_string(installed_rev_file(repo))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn save_installed_rev(repo: &str, rev: &str) {
+    let _ = std::fs::create_dir_all(log_dir());
+    let _ = std::fs::write(installed_rev_file(repo), rev);
 }
 
 /// Where a clone would land if nothing is discovered (`~/<repo>`).
@@ -586,15 +659,69 @@ pub fn pkg_of(repo: &str, dir: &Path) -> Option<String> {
     best
 }
 
-/// How many crates a build of `pkg` in `dir` will compile — the denominator
+/// The clone's own version for `pkg` — the `version` line of the same
+/// apps/* manifest [`pkg_of`] names, following `version.workspace = true`
+/// into the root manifest's `[workspace.package]` (where every suite app
+/// keeps it). The fallback signal for a stale install built before
+/// revisions were recorded.
+fn pkg_version_of(dir: &Path, pkg: &str) -> Option<String> {
+    let mut cargos: Vec<PathBuf> = std::fs::read_dir(dir.join("apps"))
+        .ok()?
+        .filter_map(|e| Some(e.ok()?.path().join("Cargo.toml")))
+        .collect();
+    cargos.sort();
+    for c in cargos {
+        let Ok(text) = std::fs::read_to_string(&c) else {
+            continue;
+        };
+        let name = text
+            .lines()
+            .find_map(|l| l.strip_prefix("name = \"")?.strip_suffix('"'))?;
+        if name != pkg {
+            continue;
+        }
+        if let Some(v) = text
+            .lines()
+            .find_map(|l| l.strip_prefix("version = \"")?.strip_suffix('"'))
+        {
+            return Some(v.to_string());
+        }
+        let workspace = text
+            .lines()
+            .any(|l| l.starts_with("version.workspace") || l.starts_with("version = { workspace"));
+        if !workspace {
+            return None;
+        }
+        let root = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+        let mut in_section = false;
+        for l in root.lines() {
+            if l.starts_with('[') {
+                in_section = l.trim() == "[workspace.package]";
+                continue;
+            }
+            if in_section
+                && let Some(v) = l.trim().strip_prefix("version = \"")
+                && let Some(v) = v.strip_suffix('"')
+            {
+                return Some(v.to_string());
+            }
+        }
+        return None;
+    }
+    None
+}
+
+/// How many units a build of `pkg` in `dir` will produce — the denominator
 /// that lets a percentage start at zero instead of guessing.
 ///
 /// Prefers the exact unit count persisted from the previous successful build
 /// of the same repo ([`units_file`]); when there isn't one (first build) it
-/// falls back to counting unique crates in `cargo tree`'s normal+build graph.
-/// The tree is a slight underestimate (it doesn't show build-script,
-/// proc-macro or host/target units cargo also produces), but it's a real,
-/// pre-computed number that makes the bar fill honestly; after the first
+/// estimates: unique crates in `cargo tree`'s normal+build graph, plus the
+/// units the tree cannot see — build scripts, and crates compiled for both
+/// host and target — derived from `cargo metadata`'s resolve graph (see
+/// [`metadata_units`]). On figcraft that turns a 404-crate tree into ~500
+/// units against 484 real ones: a few over is the safe direction (the bar
+/// parks near 97% instead of the tail going mute), and after the first
 /// build the exact count is persisted and takes over.
 ///
 /// Returns `0` on any failure (no lockfile, odd workspace, cargo missing) —
@@ -633,16 +760,297 @@ fn estimate_units(dir: &Path, repo: &str, pkg: &str) -> u64 {
         return 0;
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    // Dedupe marker `(\*)` marks a crate shown elsewhere; strip it so repeats
-    // collapse to the same crate name and `sort -u` counts each crate once.
+    // Normalize each line to `name vversion`: cargo decorates lines with
+    // ` (proc-macro)`, a workspace path, or the ` (*)` shown-elsewhere
+    // marker; shedding all of them collapses repeats to one crate and makes
+    // the key match `cargo metadata`'s `name`+`version` fields.
     let mut crates: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for line in text.lines() {
-        let name = line.trim().trim_end_matches(" (*)").trim();
+        let name = tree_crate_name(line);
         if !name.is_empty() {
             crates.insert(name);
         }
     }
-    crates.len() as u64
+    // Correct the tree's blind spot: build scripts, host-side proc-macro
+    // support, and crates compiled for both host and target (see
+    // [`metadata_units`]). Metadata failure (old cargo, no index for the
+    // lockfile) leaves the plain tree estimate — still a real number, just
+    // a lower one.
+    let meta = Command::new("cargo")
+        .args(["metadata", "--format-version", "1"])
+        .current_dir(dir)
+        .env("PATH", child_env_path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+    let extra = match meta {
+        Ok(out) if out.status.success() => {
+            let meta_text = String::from_utf8_lossy(&out.stdout);
+            metadata_units(&meta_text, pkg, &crates)
+        }
+        _ => 0,
+    };
+    crates.len() as u64 + extra
+}
+
+/// One `cargo tree` line normalized to `name vversion`.
+///
+/// Strips every trailing parenthesized decoration — the `(*)` shown-elsewhere
+/// marker, ` (proc-macro)`, and a workspace member's path — so the same
+/// crate always keys the same way. Crate names and versions never contain
+/// parentheses, so the loop is safe.
+fn tree_crate_name(line: &str) -> &str {
+    let mut name = line.trim();
+    while name.ends_with(')') {
+        match name.rfind(" (") {
+            Some(i) => name = &name[..i],
+            None => break,
+        }
+    }
+    name
+}
+
+/// Units `cargo tree` cannot show but cargo will compile, counted from
+/// `cargo metadata`'s package list and resolve graph:
+///
+/// - one `custom-build` unit per crate with a `build.rs` — plus a second
+///   when that crate is also compiled on the host side;
+/// - a second lib unit for crates that are both target and host
+///   dependencies (build-scripts and proc-macros drag their deps into the
+///   host world, where features may resolve differently).
+///
+/// Only packages present in `crates` (the tree's `name vversion` set) are
+/// counted — metadata also lists dev-dependencies and other platforms'
+/// crates, which never build here. The model is structural, so it can land
+/// a unit high when cargo merges identical host/target units; the estimate's
+/// job is to never land far *below* reality, where the tail of the bar
+/// would go mute.
+///
+/// Hand-scanned rather than parsed: in cargo's compact JSON a package object
+/// is the only place `{"name":"…","version":"…","id":"…"}` appears
+/// together (target and dependency objects have a name but no version), a
+/// resolve node is the only `"id":"…"` pair after `"resolve":`, and each
+/// edge's kinds are the exact strings `"kind":null` (normal) or
+/// `"kind":"build"`.
+fn metadata_units(json: &str, pkg: &str, crates: &std::collections::BTreeSet<&str>) -> u64 {
+    use std::collections::{HashMap, HashSet};
+
+    struct Pkg {
+        name: String,
+        version: String,
+        is_pm: bool,
+        has_cb: bool,
+    }
+
+    const NAME: &str = "{\"name\":\"";
+    const VER: &str = "\",\"version\":\"";
+    const ID: &str = "\",\"id\":\"";
+    const CB: &str = "\"kind\":[\"custom-build\"]";
+    const PM: &str = "\"kind\":[\"proc-macro\"]";
+
+    // Phase A: packages, their ids, and their target kinds. Kind markers
+    // attribute to the last package start; decoy name markers (dependency
+    // and target objects) don't interrupt that.
+    let mut pkgs: Vec<Pkg> = Vec::new();
+    let mut ids: HashMap<&str, usize> = HashMap::new();
+    let mut root_name: Option<usize> = None;
+    let mut root_path: Option<usize> = None;
+    let mut current: Option<usize> = None;
+    let mut attributed = 0usize;
+    let mut i = 0usize;
+    while let Some(rel) = json[i..].find(NAME) {
+        let marker = i + rel;
+        let region = &json[attributed..marker];
+        if let Some(ci) = current {
+            pkgs[ci].has_cb |= region.contains(CB);
+            pkgs[ci].is_pm |= region.contains(PM);
+        }
+        let after = marker + NAME.len();
+        let Some(nlen) = json[after..].find('"') else {
+            break;
+        };
+        let name = json[after..after + nlen].to_string();
+        let after_name = after + nlen;
+        if json[after_name..].starts_with(VER) {
+            let vstart = after_name + VER.len();
+            let Some(vlen) = json[vstart..].find('"') else {
+                break;
+            };
+            let version = json[vstart..vstart + vlen].to_string();
+            let after_ver = vstart + vlen; // version's closing quote
+            let mut id = "";
+            if json[after_ver..].starts_with(ID) {
+                let istart = after_ver + ID.len();
+                let Some(ilen) = json[istart..].find('"') else {
+                    break;
+                };
+                id = &json[istart..istart + ilen];
+                i = istart + ilen + 1;
+            } else {
+                i = after_ver + 1;
+            }
+            let idx = pkgs.len();
+            if name == pkg {
+                root_name.get_or_insert(idx);
+                if id.starts_with("path+") {
+                    root_path.get_or_insert(idx);
+                }
+            }
+            if !id.is_empty() {
+                ids.insert(id, idx);
+            }
+            pkgs.push(Pkg {
+                name,
+                version,
+                is_pm: false,
+                has_cb: false,
+            });
+            current = Some(idx);
+        } else {
+            i = after_name;
+        }
+        attributed = i;
+    }
+    if let Some(ci) = current {
+        let tail = &json[attributed..];
+        pkgs[ci].has_cb |= tail.contains(CB);
+        pkgs[ci].is_pm |= tail.contains(PM);
+    }
+    let Some(root_idx) = root_path.or(root_name) else {
+        return 0;
+    };
+
+    // Phase B: resolve edges. Node ids are the only `"id":"…"` pairs after
+    // `"resolve":`; each `{"pkg":"…","dep_kinds":[…]}` entry carries its
+    // edge kinds right behind the package id.
+    const NODE: &str = "\"id\":\"";
+    const PKG: &str = "\"pkg\":\"";
+    const KINDS: &str = "\"dep_kinds\":[";
+    let mut nodes: Vec<(usize, usize)> = Vec::new(); // (package, marker offset)
+    let Some(res) = json.find("\"resolve\":") else {
+        return 0;
+    };
+    let mut j = res;
+    while let Some(rel) = json[j..].find(NODE) {
+        let marker = j + rel;
+        let after = marker + NODE.len();
+        let Some(ilen) = json[after..].find('"') else {
+            break;
+        };
+        if let Some(&idx) = ids.get(&json[after..after + ilen])
+            && nodes.last().map(|(p, _)| *p != idx).unwrap_or(true)
+        {
+            nodes.push((idx, marker));
+        }
+        j = after + ilen + 1;
+    }
+    let mut edges: HashMap<usize, Vec<(usize, bool, bool)>> = HashMap::new();
+    for (n, &(idx, start)) in nodes.iter().enumerate() {
+        let end = nodes.get(n + 1).map(|(_, s)| *s).unwrap_or(json.len());
+        let span = &json[start..end];
+        let mut k = 0usize;
+        while let Some(pre) = span[k..].find(PKG) {
+            let pmark = k + pre + PKG.len();
+            let Some(plen) = span[pmark..].find('"') else {
+                break;
+            };
+            let rest = &span[pmark + plen + 1..];
+            let window_end = rest.find(PKG).unwrap_or(rest.len().min(400));
+            let window = &rest[..window_end];
+            k = pmark + plen + 1;
+            let Some(&dep) = ids.get(&span[pmark..pmark + plen]) else {
+                continue;
+            };
+            let (normal, build) = match window.find(KINDS) {
+                Some(dk) => {
+                    let ks = &window[dk + KINDS.len()..];
+                    let kinds = &ks[..ks.find(']').unwrap_or(ks.len())];
+                    (
+                        kinds.contains("\"kind\":null"),
+                        kinds.contains("\"kind\":\"build\""),
+                    )
+                }
+                None => (true, false),
+            };
+            edges.entry(idx).or_default().push((dep, normal, build));
+        }
+    }
+
+    // Phase C: the unit closures. Target = normal-edge reachability from the
+    // root, stopping at proc-macros (their interiors are host-only). Host =
+    // build-deps of the root and of every build-script package, closed over
+    // normal+build edges, plus the normal deps of every target proc-macro.
+    let mut target: HashSet<usize> = HashSet::new();
+    let mut stack = vec![root_idx];
+    while let Some(p) = stack.pop() {
+        if !target.insert(p) || pkgs[p].is_pm {
+            continue;
+        }
+        if let Some(es) = edges.get(&p) {
+            stack.extend(es.iter().filter(|e| e.1).map(|e| e.0));
+        }
+    }
+    let mut host: HashSet<usize> = HashSet::new();
+    let mut stack: Vec<usize> = Vec::new();
+    let seed_build = |p: usize, host: &mut HashSet<usize>, stack: &mut Vec<usize>| {
+        if let Some(es) = edges.get(&p) {
+            for &(dep, _, build) in es {
+                if build && host.insert(dep) {
+                    stack.push(dep);
+                }
+            }
+        }
+    };
+    seed_build(root_idx, &mut host, &mut stack);
+    for (p, pkg) in pkgs.iter().enumerate() {
+        if pkg.has_cb {
+            seed_build(p, &mut host, &mut stack);
+        }
+    }
+    let drain = |host: &mut HashSet<usize>, stack: &mut Vec<usize>| {
+        while let Some(p) = stack.pop() {
+            if let Some(es) = edges.get(&p) {
+                for &(dep, normal, build) in es {
+                    if (normal || build) && host.insert(dep) {
+                        stack.push(dep);
+                    }
+                }
+            }
+        }
+    };
+    drain(&mut host, &mut stack);
+    loop {
+        let before = host.len();
+        for &p in &target {
+            if pkgs[p].is_pm
+                && let Some(es) = edges.get(&p)
+            {
+                for &(dep, normal, _) in es {
+                    if normal && host.insert(dep) {
+                        stack.push(dep);
+                    }
+                }
+            }
+        }
+        drain(&mut host, &mut stack);
+        if host.len() == before {
+            break;
+        }
+    }
+
+    let matched =
+        |p: usize| crates.contains(format!("{} v{}", pkgs[p].name, pkgs[p].version).as_str());
+    let mut extras = 0u64;
+    for (p, pkg) in pkgs.iter().enumerate() {
+        let dual = target.contains(&p) && host.contains(&p) && !pkg.is_pm && matched(p);
+        extras += u64::from(dual);
+        if pkg.has_cb && matched(p) {
+            extras += 1;
+            extras += u64::from(dual);
+        }
+    }
+    extras
 }
 
 /// Remember a build's exact unit count so the next progress bar is precise.
@@ -727,6 +1135,7 @@ fn info_of(repo: &'static str, dir: PathBuf, menu: Option<&MenuEntry>) -> AppInf
         behind: None,
         commits: Vec::new(),
         menu: false,
+        stale: false,
     };
     refresh_local(&mut a, menu);
     a
@@ -740,8 +1149,9 @@ pub fn rescan_one(a: &mut AppInfo, track: Track) {
     refresh_git(a, track);
 }
 
-/// Re-read one row's local facts without touching git — for when the fetch
-/// failed and stale refs must not masquerade as current state.
+/// Re-read one row's local facts when the fetch failed: no upstream state
+/// (stale remote refs must not masquerade as current), but the install-vs-
+/// clone staleness is still read — it only needs the local HEAD.
 pub fn rescan_local(a: &mut AppInfo) {
     refresh_local(a, menu_map().get(a.repo));
     a.behind = None;
@@ -760,6 +1170,9 @@ fn refresh_local(a: &mut AppInfo, menu: Option<&MenuEntry>) {
     a.version = bin.as_ref().and_then(|b| version_of(b));
     a.pkg = pkg;
     a.menu = menu.is_some();
+    // a local fact, needing no upstream: the binary against the clone's
+    // current HEAD. Computed here so offline rescans and `--status` see it.
+    a.stale = a.cloned && a.installed && install_is_stale(a.repo, &a.dir, a.version.as_deref());
 }
 
 fn refresh_git(a: &mut AppInfo, track: Track) {
@@ -778,6 +1191,31 @@ fn refresh_git(a: &mut AppInfo, track: Track) {
             a.commits = state.map(|(_, tags)| tags).unwrap_or_default();
         }
     }
+}
+
+/// The clone's current HEAD, as a full revision string.
+fn head_rev(dir: &Path) -> Option<String> {
+    run_capture("git", &["-C", &dir.to_string_lossy(), "rev-parse", "HEAD"])
+}
+
+/// Whether the installed binary predates the clone's current HEAD — the
+/// aftermath of a pull that moved the source on while the build was
+/// cancelled or failed, leaving the previous binary in place. A recorded
+/// build revision ([`installed_rev`]) is compared directly; installs from
+/// before revisions were recorded fall back to the binary's `--version`
+/// against the clone's package version — as a whole token, since the probe
+/// prints "FigCraft 0.6.0" while the manifest says "0.6.0".
+pub fn install_is_stale(repo: &str, dir: &Path, bin_version: Option<&str>) -> bool {
+    if let (Some(recorded), Some(head)) = (installed_rev(repo), head_rev(dir)) {
+        return recorded != head;
+    }
+    let Some(pkg) = pkg_of(repo, dir) else {
+        return false;
+    };
+    let Some(src_version) = pkg_version_of(dir, &pkg) else {
+        return false;
+    };
+    bin_version.is_some_and(|v| !v.split_whitespace().any(|t| t == src_version))
 }
 
 /// Whether the scan pipeline checks upstream on launch and `r`.
@@ -1237,6 +1675,13 @@ pub fn uninstall(repo: &str, dir: &Path) -> Result<String, String> {
     if !had_bin && !desk_removed && icons_removed == 0 {
         return Err("nothing installed to remove".into());
     }
+    // The remembered unit count describes this install's build; with the app
+    // gone, drop the seed so a future install re-estimates instead of
+    // trusting a count from an uninstall that may never come back the same.
+    let _ = std::fs::remove_file(units_file(repo));
+    // likewise the build revision: a future install starts unjudged, not
+    // stale against a clone that may have moved on in the meantime.
+    let _ = std::fs::remove_file(installed_rev_file(repo));
     // only a real clone is deleted: a menu-only install has no source here,
     // and `dir` then just points at where a future clone would land
     let had_clone = dir.join("Cargo.toml").is_file();
@@ -1251,13 +1696,18 @@ pub fn uninstall(repo: &str, dir: &Path) -> Result<String, String> {
 }
 
 /// Read a build's output line by line, tee every line to the shared log, and
-/// — on the JSON (stdout) side — count the crates cargo actually compiles.
+/// — on the JSON (stdout) side — count cargo's artifacts into the live
+/// [`Progress`].
 ///
 /// `seed` is the pre-computed denominator ([`estimate_units`]); it's sent as a
 /// `done: 0` event before the first crate so the bar renders empty from the
-/// start. The function returns how many `compiler-artifact` events it saw in
-/// total (fresh and non-fresh alike) — the exact unit count, worth persisting
-/// so the next build's denominator is precise rather than a tree estimate.
+/// start. Every `compiler-artifact` (fresh or not) bumps `seen`, only a
+/// non-`fresh` one bumps `done` and samples the pace, and
+/// `build-script-executed` lines sample the pace alone; a `Progress` event
+/// goes out on each of those. The function returns how many
+/// `compiler-artifact` events it saw in total — the exact unit count, worth
+/// persisting so the next build's denominator is precise rather than a tree
+/// estimate.
 ///
 /// The counting is what turns "still building" into a real percentage: cargo
 /// prints one `compiler-artifact` object per produced crate, and `fresh: true`
@@ -1273,8 +1723,11 @@ fn pump_build_lines(
     let Some(stream) = stream else { return 0 };
     let mut progress = Progress {
         done: 0,
+        seen: 0,
         total: seed,
         started: Instant::now(),
+        pace_secs: None,
+        last_real: None,
     };
     if count && seed > 0 {
         // Show the empty bar immediately, before the first crate finishes.
@@ -1294,14 +1747,26 @@ fn pump_build_lines(
         if count && is_artifact(&line) {
             // Every artifact event (fresh or not) is one unit cargo produced.
             units += 1;
-            // Only a non-fresh artifact is real progress toward done.
+            progress.seen += 1;
+            // Only a non-fresh artifact is real progress toward done — and
+            // only real work informs the pace (fresh bursts would lie).
             if artifact_progress(&line).is_some() {
                 progress.done += 1;
-                let _ = tx.send(Ev::Progress {
-                    repo: repo.to_string(),
-                    progress: progress.clone(),
-                });
+                progress.observe(Instant::now());
             }
+            let _ = tx.send(Ev::Progress {
+                repo: repo.to_string(),
+                progress: progress.clone(),
+            });
+        } else if count && is_build_script(&line) {
+            // Build scripts are among the slowest units but emit no artifact
+            // while they run — sample the pace anyway so the ETA keeps
+            // moving during a script-heavy stretch.
+            progress.observe(Instant::now());
+            let _ = tx.send(Ev::Progress {
+                repo: repo.to_string(),
+                progress: progress.clone(),
+            });
         }
     }
     units
@@ -1311,6 +1776,13 @@ fn pump_build_lines(
 /// this" line, whether it just compiled it or served it fresh from cache.
 fn is_artifact(line: &str) -> bool {
     line.contains("\"compiler-artifact\"")
+}
+
+/// True for cargo's `build-script-executed` event — a `build.rs` run, real
+/// compile time that produces no artifact of its own. Used only to sample
+/// the pace; it never counts toward `done`/`seen`.
+fn is_build_script(line: &str) -> bool {
+    line.contains("\"reason\":\"build-script-executed\"")
 }
 
 /// Parse one `--message-format=json` line: `Some(1)` when it's a freshly
@@ -1399,6 +1871,11 @@ fn build_install(dir: &Path, repo: &str, tx: &Sender<Ev>) -> Result<String, Stri
     let dst = bin_dir().join(&pkg);
     std::fs::create_dir_all(bin_dir()).map_err(|e| e.to_string())?;
     std::fs::copy(&src, &dst).map_err(|e| format!("install {dst:?}: {e}"))?;
+    // The binary on disk came from this exact revision — remember it, so a
+    // later pull can tell a rebuilt install from a stale one.
+    if let Some(head) = head_rev(dir) {
+        save_installed_rev(repo, &head);
+    }
     let menu = install_menu_entry(dir);
     let v = version_of(&dst).unwrap_or_else(|| "ok".into());
     Ok(if menu {
@@ -1463,15 +1940,22 @@ pub fn run_action(
             if !dir.join("Cargo.toml").is_file() {
                 return Err("not cloned - install it first".into());
             }
-            let before = run_capture("git", &["-C", &dir.to_string_lossy(), "rev-parse", "HEAD"]);
+            let before = head_rev(dir);
             match track {
                 Track::Commits => git_pull(repo, dir)?,
                 Track::Releases => update_to_release(repo, dir)?,
             }
-            let after = run_capture("git", &["-C", &dir.to_string_lossy(), "rev-parse", "HEAD"]);
+            let after = head_rev(dir);
             let pkg = pkg_of(repo, dir);
-            let bin_ok = pkg.as_ref().is_some_and(|p| find_bin(p).is_some());
-            if before == after && bin_ok {
+            let bin = pkg.as_ref().and_then(|p| find_bin(p));
+            // "up to date" must mean the *install* is current too: a clone
+            // that already moved on (a previous pull whose build never
+            // finished) carries a stale binary that `u` has to rebuild,
+            // not skip.
+            let stale = bin
+                .as_ref()
+                .is_some_and(|b| install_is_stale(repo, dir, version_of(b).as_deref()));
+            if before == after && bin.is_some() && !stale {
                 return Ok(format!("{repo}: up to date"));
             }
             build_install(dir, repo, tx)
@@ -1564,36 +2048,93 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    /// A `Progress` whose clock reads `elapsed` seconds ago.
-    fn progress_at(done: u64, total: u64, elapsed: u64) -> Progress {
+    /// A `Progress` whose clock reads `elapsed` seconds ago. `seen` counts
+    /// every artifact emitted so far, `done` the non-fresh subset of them.
+    fn progress_at(done: u64, seen: u64, total: u64, elapsed: u64) -> Progress {
         Progress {
             done,
+            seen,
             total,
             started: Instant::now() - Duration::from_secs(elapsed),
+            pace_secs: None,
+            last_real: None,
         }
     }
 
     #[test]
-    fn progress_pct_waits_for_a_real_denominator() {
-        assert_eq!(progress_at(0, 0, 0).pct(), None, "no total, no percentage");
-        assert_eq!(progress_at(0, 80, 0).pct(), Some(0));
-        assert_eq!(progress_at(43, 80, 0).pct(), Some(53));
-        assert_eq!(progress_at(80, 80, 0).pct(), Some(100));
-        // done can momentarily exceed a slightly-underestimated total (the
-        // cargo-tree seed misses build-script units); the bar must clamp
-        // rather than claim 180%.
-        assert_eq!(progress_at(90, 80, 0).pct(), Some(100));
+    fn progress_pct_weights_done_against_real_work_left() {
+        // No total means no honest percentage — the UI shows elapsed time.
+        assert_eq!(
+            progress_at(0, 0, 0, 0).pct(),
+            None,
+            "no total, no percentage"
+        );
+        // A seeded build starts at zero with an empty bar.
+        assert_eq!(progress_at(0, 0, 80, 0).pct(), Some(0));
+        // Cold build: nothing was fresh, so 43 of 80 crates is 53% — the
+        // classic done-over-total reading.
+        assert_eq!(progress_at(43, 43, 80, 0).pct(), Some(53));
+        // Warm-build regression: 400 fresh crates streamed by, only 10 real
+        // ones compiled of 449 expected. done/total would read 2%; the bar
+        // instead weighs done against the work actually left
+        // (10 / (10 + 449 − 410) ≈ 20%).
+        assert_eq!(progress_at(10, 410, 449, 0).pct(), Some(20));
+        // The seed ran out mid-build (cargo-tree undercounts): hold at 99%,
+        // never claim completion before the build reports Done.
+        assert_eq!(progress_at(90, 80, 80, 0).pct(), Some(99));
+        // Everything fresh and nothing compiled (a no-op rebuild): no
+        // evidence of real work, so no over-claim either.
+        assert_eq!(progress_at(0, 80, 80, 0).pct(), Some(0));
     }
 
     #[test]
-    fn progress_eta_is_linear_and_never_trusts_zero_work() {
-        // 10 of 40 crates in ~20s → 30 left at 0.5 crates/s → ~60s. The clock
-        // ticks forward during the test, so the rate is only ever slightly low.
-        let eta = progress_at(10, 40, 20).eta_secs().expect("some eta");
-        assert!((60..=62).contains(&eta), "expected ~60s, got {eta}s");
-        assert_eq!(progress_at(0, 40, 20).eta_secs(), None, "nothing done yet");
-        assert_eq!(progress_at(40, 40, 20).eta_secs(), None, "nothing left");
-        assert_eq!(progress_at(0, 0, 20).eta_secs(), None, "no total");
+    fn progress_eta_is_unresolved_units_times_recent_pace() {
+        // All pace gaps are measured from one anchor so the arithmetic is
+        // exact (two separate now() calls would add stray nanoseconds).
+        let t0 = Instant::now();
+
+        // Cold build: 10 compiled, none fresh, 30 left at 10s/crate → 300s.
+        let mut cold = progress_at(10, 10, 40, 0);
+        cold.observe(t0);
+        cold.observe(t0 + Duration::from_secs(10));
+        assert_eq!(cold.pace_secs, Some(10.0));
+        assert_eq!(cold.eta_secs(), Some(300));
+
+        // Warm-build regression: 400 fresh streamed by, 10 real compiled at
+        // a steady 15s/crate. The old elapsed-rate formula claimed ~2h here
+        // (it extrapolated 439 "left" at the rate of 10 crates); unresolved
+        // units × pace says ~10 min.
+        let mut warm = progress_at(10, 410, 449, 0);
+        warm.observe(t0);
+        warm.observe(t0 + Duration::from_secs(15));
+        assert_eq!(warm.eta_secs(), Some(39 * 15));
+
+        // The EWMA keeps recent crates dominant: gaps 10s then 20s →
+        // 0.3·20 + 0.7·10 = 13s per unit, 30 left → 390s.
+        let mut ewma = progress_at(10, 10, 40, 0);
+        ewma.observe(t0);
+        ewma.observe(t0 + Duration::from_secs(10));
+        ewma.observe(t0 + Duration::from_secs(30));
+        assert_eq!(ewma.pace_secs, Some(13.0));
+        assert_eq!(ewma.eta_secs(), Some(30 * 13));
+
+        // No pace yet (fewer than two real samples) — the pre-build phase
+        // shows elapsed time, never a guess.
+        assert_eq!(
+            progress_at(10, 10, 40, 0).eta_secs(),
+            None,
+            "no pace, no estimate"
+        );
+        // Nothing unresolved: the build is over, not "0s left".
+        let mut exhausted = progress_at(10, 40, 40, 0);
+        exhausted.observe(t0);
+        exhausted.observe(t0 + Duration::from_secs(5));
+        assert_eq!(exhausted.eta_secs(), None, "nothing left");
+        // A pace without a denominator is equally untrustworthy.
+        let mut blind = progress_at(10, 10, 0, 0);
+        blind.observe(t0);
+        blind.observe(t0 + Duration::from_secs(5));
+        assert_eq!(blind.eta_secs(), None, "no total");
     }
 
     #[test]
@@ -1627,6 +2168,78 @@ mod tests {
     }
 
     #[test]
+    fn build_script_events_match_and_nothing_else_does() {
+        // A build.rs run is real compile time with no artifact of its own —
+        // it samples the pace but never counts as done or seen.
+        assert!(is_build_script(
+            r#"{"reason":"build-script-executed","package_id":"foo","linked_libs":[]}"#
+        ));
+        assert!(!is_build_script(
+            r#"{"reason":"compiler-artifact","fresh":false}"#
+        ));
+        assert!(!is_build_script(r#"{"reason":"compiler-message"}"#));
+        assert!(!is_build_script("not json at all"));
+    }
+
+    #[test]
+    fn pump_counts_every_artifact_and_paces_only_from_real_work() {
+        // Cargo-shaped feed: a build-script run, a cached crate, and two
+        // compiled ones. Fresh events must be counted *and* reported (they
+        // resolve units for free); only `done` and the pace stay untouched.
+        let feed = concat!(
+            r#"{"reason":"build-script-executed"}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","fresh":true}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","fresh":false}"#,
+            "\n",
+            r#"{"reason":"compiler-artifact","fresh":false}"#,
+            "\n",
+        );
+        let repo = "engine-test-pump";
+        let log_path = log_dir().join(format!("{repo}.log"));
+        let log = Arc::new(Mutex::new(File::create(&log_path).expect("log")));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let units = pump_build_lines(
+            Some(std::io::Cursor::new(feed.as_bytes())),
+            repo,
+            &log,
+            &tx,
+            true,
+            40,
+        );
+        drop(tx);
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.recv() {
+            if let Ev::Progress { repo: r, progress } = ev {
+                assert_eq!(r, repo);
+                events.push(progress);
+            }
+        }
+        assert_eq!(units, 3, "only compiler-artifact lines count as units");
+        assert_eq!(
+            events.len(),
+            5,
+            "seed + build-script + 3 artifacts must all report"
+        );
+        let last = events.last().expect("progress events");
+        assert_eq!(
+            (last.done, last.seen, last.total),
+            (2, 3, 40),
+            "two compiled, three seen, seed unchanged"
+        );
+        assert!(
+            last.pace_secs.is_some(),
+            "a script run plus two crates must seed a pace"
+        );
+        assert!(
+            events.iter().any(|p| p.seen == 1 && p.done == 0),
+            "the fresh crate must be reported as an event of its own"
+        );
+        cleanup(&log_path);
+    }
+
+    #[test]
     fn a_persisted_unit_count_seeds_the_next_build() {
         // After a successful build the exact unit count is remembered, and the
         // next build reads it back instead of re-estimating from cargo tree.
@@ -1649,6 +2262,108 @@ mod tests {
         let repo = "engine-test-units-unknown";
         let _ = std::fs::remove_file(units_file(repo));
         assert_eq!(estimate_units(Path::new("/nonexistent"), repo, "pkg"), 0);
+    }
+
+    #[test]
+    fn tree_lines_shed_every_cargo_decoration() {
+        // Same crate, four decorations: the key must be `name vversion` so
+        // repeats collapse and metadata can match it.
+        assert_eq!(tree_crate_name("serde v1.0.219"), "serde v1.0.219");
+        assert_eq!(tree_crate_name("serde v1.0.219 (*)"), "serde v1.0.219");
+        assert_eq!(
+            tree_crate_name("bytemuck_derive v1.12.1 (proc-macro)"),
+            "bytemuck_derive v1.12.1"
+        );
+        assert_eq!(
+            tree_crate_name("figcraft v0.6.0 (/home/u/figcraft/apps/figcraft)"),
+            "figcraft v0.6.0"
+        );
+        assert_eq!(
+            tree_crate_name("  ahash v0.8.12 (*)  "),
+            "ahash v0.8.12",
+            "whitespace and the marker go together"
+        );
+    }
+
+    #[test]
+    fn a_first_build_estimate_never_lands_under_the_real_unit_count() {
+        // Live check against a real suite clone (skipped when it isn't
+        // there): figcraft's first build produced 484 cargo units, and the
+        // tree+metadata estimate must reach at least that — landing under
+        // is what made the tail of the bar go mute. The persisted exact
+        // count is set aside so the estimator actually runs.
+        let dir = home().join("figcraft");
+        if !dir.join("Cargo.toml").is_file() {
+            return;
+        }
+        let _ = std::fs::rename(units_file("figcraft"), units_file("figcraft.bak"));
+        let n = estimate_units(&dir, "figcraft", "figcraft");
+        let _ = std::fs::rename(units_file("figcraft.bak"), units_file("figcraft"));
+        assert!(
+            (484..=520).contains(&n),
+            "estimate must cover the 484 real units without running away: {n}"
+        );
+    }
+
+    #[test]
+    fn metadata_units_counts_build_scripts_and_dual_compiled_crates() {
+        // Cargo-shaped compact JSON with a resolve graph: `dual` and `mixed`
+        // are both target and host deps (second lib unit); `inner`'s build
+        // script runs for its proc-macro consumer; `solo` is a build-dep
+        // only (one host unit); `ghost` is a dev-dep and must not count.
+        let json = concat!(
+            r#"{"packages":["#,
+            r#"{"name":"app","version":"0.1.0","id":"path+file:///app#app@0.1.0","#,
+            r#""targets":[{"kind":["bin"],"name":"app"}],"dependencies":[]},"#,
+            r#"{"name":"dual","version":"1.0.0","id":"registry+d#dual@1.0.0","#,
+            r#""targets":[{"kind":["lib"],"name":"dual"}]},"#,
+            r#"{"name":"pm","version":"1.0.0","id":"registry+p#pm@1.0.0","#,
+            r#""targets":[{"kind":["proc-macro"],"name":"pm"}]},"#,
+            r#"{"name":"inner","version":"1.0.0","id":"registry+i#inner@1.0.0","#,
+            r#""targets":[{"kind":["custom-build"],"name":"build-script-build"},#,
+            r#"{"kind":["lib"],"name":"inner"}]},"#,
+            r#"{"name":"solo","version":"1.0.0","id":"registry+s#solo@1.0.0","#,
+            r#""targets":[{"kind":["custom-build"],"name":"build-script-build"},#,
+            r#"{"kind":["lib"],"name":"solo"}]},"#,
+            r#"{"name":"mixed","version":"1.0.0","id":"registry+m#mixed@1.0.0","#,
+            r#""targets":[{"kind":["custom-build"],"name":"build-script-build"},#,
+            r#"{"kind":["lib"],"name":"mixed"}]},"#,
+            r#"{"name":"ghost","version":"9.9.9","id":"registry+g#ghost@9.9.9","#,
+            r#""targets":[{"kind":["custom-build"],"name":"build-script-build"}]}],"#,
+            r#""resolve":{"root":null,"nodes":["#,
+            r#"{"id":"path+file:///app#app@0.1.0","dependencies":[],"deps":["#,
+            r#"{"pkg":"registry+d#dual@1.0.0","dep_kinds":[{"kind":null,"target":null},#,
+            r#"{"kind":"build","target":null}]},"#,
+            r#"{"pkg":"registry+p#pm@1.0.0","dep_kinds":[{"kind":null,"target":null}]},"#,
+            r#"{"pkg":"registry+s#solo@1.0.0","dep_kinds":[{"kind":"build","target":null}]},"#,
+            r#"{"pkg":"registry+m#mixed@1.0.0","dep_kinds":[{"kind":null,"target":null},#,
+            r#"{"kind":"build","target":null}]},"#,
+            r#"{"pkg":"registry+g#ghost@9.9.9","dep_kinds":[{"kind":"dev","target":null}]}]},"#,
+            r#"{"id":"registry+d#dual@1.0.0","dependencies":[],"deps":[]},"#,
+            r#"{"id":"registry+p#pm@1.0.0","dependencies":[],"deps":["#,
+            r#"{"pkg":"registry+i#inner@1.0.0","dep_kinds":[{"kind":null,"target":null}]}]},"#,
+            r#"{"id":"registry+i#inner@1.0.0","dependencies":[],"deps":[]},"#,
+            r#"{"id":"registry+s#solo@1.0.0","dependencies":[],"deps":[]},"#,
+            r#"{"id":"registry+m#mixed@1.0.0","dependencies":[],"deps":[]},"#,
+            r#"{"id":"registry+g#ghost@9.9.9","dependencies":[],"deps":[]}],"#,
+            r#""workspace_members":[]}"#,
+        );
+        let set: std::collections::BTreeSet<&str> = [
+            "app v0.1.0",
+            "dual v1.0.0",
+            "pm v1.0.0",
+            "inner v1.0.0",
+            "solo v1.0.0",
+            "mixed v1.0.0",
+        ]
+        .into_iter()
+        .collect();
+        // dual + mixed (2 second units) + inner/solo/mixed build scripts (3)
+        // + mixed's second build-script run (1) = 6; ghost is dev-only.
+        assert_eq!(metadata_units(json, "app", &set), 6);
+        // No tree set: nothing matches, however rich the graph.
+        let empty: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        assert_eq!(metadata_units(json, "app", &empty), 0);
     }
 
     #[test]
@@ -1950,6 +2665,88 @@ mod tests {
         git_in(&clone, &["checkout", "v0.2.0"]);
         let (n, tags) = releases_state(&clone).expect("releases state");
         assert_eq!((n, tags.len()), (0, 0), "on the latest release");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// The vectorcraft regression: a pull moves the clone on, the build is
+    /// cancelled, and the row used to say "0.11.0 · up to date" forever.
+    /// Recorded build revisions must call the install stale until it is
+    /// rebuilt — including from a detached release checkout.
+    #[test]
+    fn a_pull_without_a_rebuild_leaves_the_install_stale() {
+        let repo = "staletest"; // unique cache key: the test owns its .rev
+        let root = tmp_tree("stale");
+        let clone = root.join("clone");
+        git_in(&root, &["init", "-b", "main", "clone"]);
+        std::fs::write(clone.join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("write");
+        git_in(&clone, &["add", "."]);
+        commit_in(&clone, "first");
+        // the install was built from this HEAD
+        let built_from = head_rev(&clone).expect("head");
+        save_installed_rev(repo, &built_from);
+        assert!(
+            !install_is_stale(repo, &clone, Some("0.11.0")),
+            "an install built from the current HEAD is not stale"
+        );
+        // the clone moves on (the pull half of `u`), the rebuild never runs
+        git_in(&clone, &["tag", "v0.1.0"]);
+        std::fs::write(clone.join("Cargo.toml"), "[package]\nname = \"y\"\n").expect("write");
+        git_in(&clone, &["add", "."]);
+        commit_in(&clone, "second");
+        assert!(
+            install_is_stale(repo, &clone, Some("0.11.0")),
+            "the old binary must be stale against the moved-on clone"
+        );
+        // a rebuild records the new HEAD: stale clears
+        save_installed_rev(repo, &head_rev(&clone).expect("head"));
+        assert!(!install_is_stale(repo, &clone, Some("0.12.0")));
+        // a detached release checkout is judged by its commit the same way
+        git_in(&clone, &["checkout", "v0.1.0"]);
+        assert!(
+            install_is_stale(repo, &clone, Some("0.12.0")),
+            "landing on an older tag also leaves the newer binary stale"
+        );
+        let _ = std::fs::remove_file(installed_rev_file(repo));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Installs that predate recorded revisions fall back to comparing the
+    /// binary's --version against the clone's package version — the exact
+    /// signal that caught the vectorcraft 0.11.0-vs-0.12.0 lie. Suite apps
+    /// keep that version in the root manifest's [workspace.package].
+    #[test]
+    fn without_a_recorded_revision_the_version_mismatch_names_the_stale_install() {
+        let repo = "staleversiontest";
+        let _ = std::fs::remove_file(installed_rev_file(repo));
+        let root = tmp_tree("stalev");
+        let clone = root.join("clone");
+        std::fs::create_dir_all(clone.join("apps/photocraft")).expect("mkdir");
+        std::fs::write(
+            clone.join("apps/photocraft/Cargo.toml"),
+            "[package]\nname = \"photocraft\"\nversion.workspace = true\n",
+        )
+        .expect("write");
+        std::fs::write(
+            clone.join("Cargo.toml"),
+            "[workspace.package]\nversion = \"0.12.0\"\n",
+        )
+        .expect("write");
+        assert!(
+            install_is_stale(repo, &clone, Some("photocraft 0.11.0")),
+            "an older binary against a newer manifest is stale"
+        );
+        assert!(
+            !install_is_stale(repo, &clone, Some("photocraft 0.12.0")),
+            "the probe's 'name version' line matches the manifest's bare version"
+        );
+        assert!(
+            !install_is_stale(repo, &clone, Some("0.12.0 (dev build)")),
+            "a suffixed probe line still carries the version as a token"
+        );
+        assert!(
+            !install_is_stale(repo, &clone, None),
+            "no version to compare: never claim stale"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 

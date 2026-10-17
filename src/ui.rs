@@ -103,7 +103,7 @@ fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
     let up = app
         .apps
         .iter()
-        .filter(|a| a.installed && (a.behind == Some(0) || !a.cloned))
+        .filter(|a| a.installed && !a.stale && (a.behind == Some(0) || !a.cloned))
         .count();
     // clones whose upstream check hasn't landed — unknown, not "current"
     let unchecked = app
@@ -248,9 +248,13 @@ fn row_state(app: &App, a: &AppInfo) -> (String, String, Tint) {
                 format!("{n} {} behind", behind_word(app.track, n)),
                 Tint::Warn,
             ),
+            // the clone is current but the binary was built from an older
+            // HEAD — a pull whose build never finished. Say so; `u` rebuilds.
+            Some(_) if a.stale => ("↻".into(), "update ready".into(), Tint::Warn),
             Some(_) => ("✓".into(), "up to date".into(), Tint::Good),
             // cloned, but the upstream check hasn't landed (offline or no
             // upstream) — say so instead of trusting stale refs
+            None if a.stale => ("↻".into(), "update ready".into(), Tint::Warn),
             None => ("?".into(), "not checked".into(), Tint::Muted),
         }
     } else if a.cloned {
@@ -371,6 +375,25 @@ fn details_for<'a>(app: &App, a: &AppInfo, s: Sty, width: usize) -> (String, Vec
             )));
             (title, lines)
         }
+        // the clone is current but the binary predates it: a pull whose
+        // build never finished. There is nothing to pull — the update is
+        // already on disk, waiting to be rebuilt.
+        _ if a.installed && a.cloned && a.stale => {
+            let version = a.version.as_deref().unwrap_or("no version");
+            (
+                format!(" {repo} — update ready "),
+                vec![
+                    Line::from(Span::styled(
+                        format!(" {version} · source is newer than the install"),
+                        s.fg(Tint::Warn),
+                    )),
+                    Line::from(Span::styled(
+                        " u rebuilds it · Enter launches the installed one",
+                        s.fg(Tint::Faint),
+                    )),
+                ],
+            )
+        }
         _ if a.installed && !a.cloned => {
             let version = a.version.as_deref().unwrap_or("no version");
             (
@@ -467,7 +490,7 @@ fn progress_line<'a>(p: &engine::Progress, s: Sty, width: usize) -> Line<'a> {
         (Some(pct), eta) => {
             // Keep bar + numbers inside the pane even when it's narrow.
             let eta_str = eta.map_or_else(|| "…".into(), crate::app::coarse_eta);
-            let text = format!("{pct}% · {eta_str} left · {}/{}", p.done, p.total);
+            let text = format!("{pct}% · {eta_str} left · {} compiled", p.done);
             let bar_w = width.saturating_sub(text.chars().count() + 3).max(4);
             let filled = bar_w * pct as usize / 100;
             let bar: String = "█".repeat(filled) + &"░".repeat(bar_w - filled);
@@ -599,7 +622,8 @@ fn draw_help(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
         Line::from(Span::styled("Reading a row", h)),
         Line::from("  ✓ up to date    ↑n behind   ◐ updating…   ◌ queued"),
         Line::from("  ✗ build failed  ○ cloned, not built   · missing"),
-        Line::from("  ? not checked   f fetches · u updates"),
+        Line::from("  ? not checked   ↻ update ready (source newer)"),
+        Line::from("                   f fetches · u updates"),
         Line::from("                   colour tier auto · NO_COLOR=1 = mono"),
     ];
     // full-width modal so nothing bleeds around it; capped to the screen so it
@@ -752,6 +776,7 @@ mod tests {
             behind: Some(0),
             commits: Vec::new(),
             menu: true,
+            stale: false,
         }])
     }
 
@@ -766,6 +791,7 @@ mod tests {
             behind,
             commits: Vec::new(),
             menu: false,
+            stale: false,
         }
     }
 
@@ -919,6 +945,48 @@ mod tests {
             crossterm::event::KeyModifiers::NONE,
         ));
         assert_eq!(a.visible_rows(), vec![1], "only the unchecked clone stays");
+    }
+
+    /// The vectorcraft regression: the clone sat on 0.12.0, the binary was
+    /// 0.11.0, and the row said "up to date". A stale install must announce
+    /// itself, leave the up-to-date counter, and stay in the attention view.
+    #[test]
+    fn a_stale_install_says_update_ready_not_up_to_date() {
+        let mut a = app(); // photocraft: behind 0, built from the same HEAD
+        a.apps.push(app_info("wordcraft", true, true, Some(0)));
+        a.apps[1].stale = true;
+        a.apps[1].version = Some("0.11.0".into());
+        let rows = render(&a, 80, 24);
+        let row = rows
+            .iter()
+            .find(|r| r.contains("wordcraft"))
+            .expect("row present");
+        assert!(row.contains('↻'), "no stale glyph: {row:?}");
+        assert!(row.contains("update ready"), "no stale phrase: {row:?}");
+        assert!(
+            !row.contains("up to date"),
+            "a stale install must never read as current: {row:?}"
+        );
+        let head = &rows[0];
+        assert!(
+            head.contains("✓ 1"),
+            "only the fresh photocraft counts up: {head:?}"
+        );
+        // the details pane explains it and points at the fix
+        a.sel = 1;
+        let joined = render(&a, 80, 24).join("\n");
+        assert!(joined.contains("wordcraft — update ready"), "{joined:?}");
+        assert!(
+            joined.contains("source is newer than the install"),
+            "{joined:?}"
+        );
+        assert!(joined.contains("u rebuilds it"), "{joined:?}");
+        // and the attention filter keeps it
+        a.on_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('o'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(a.visible_rows(), vec![1], "the stale install stays");
     }
 
     #[test]
@@ -1078,16 +1146,21 @@ mod tests {
 
     #[test]
     fn a_building_row_shows_a_bar_and_a_tilde_eta() {
-        // A build at 43/80 crates, started two minutes ago: honest numbers, and
-        // the ETA is prefixed with `~` so it never reads as a countdown.
+        // A cold build at 43 of 80 expected crates, two minutes ago: honest
+        // numbers, and the ETA is prefixed with `~` so it never reads as a
+        // countdown.
         let mut a = app();
         a.busy.insert("photocraft".into(), "building".into());
         a.progress.insert(
             "photocraft".into(),
             engine::Progress {
                 done: 43,
+                seen: 43,
                 total: 80,
                 started: std::time::Instant::now() - std::time::Duration::from_secs(130),
+                // 37 unresolved × 2s per crate → ~1m left.
+                pace_secs: Some(2.0),
+                last_real: Some(std::time::Instant::now()),
             },
         );
         let rows = render(&a, 80, 24);
@@ -1095,7 +1168,10 @@ mod tests {
         assert!(joined.contains("building — photocraft"), "{joined:?}");
         assert!(joined.contains("█"), "no filled bar cell: {joined:?}");
         assert!(joined.contains("53%"), "wrong percentage: {joined:?}");
-        assert!(joined.contains("43/80"), "crate count missing: {joined:?}");
+        assert!(
+            joined.contains("43 compiled"),
+            "crate count missing: {joined:?}"
+        );
         assert!(
             joined.contains('~'),
             "an ETA must read as an estimate: {joined:?}"
@@ -1113,13 +1189,19 @@ mod tests {
             "photocraft".into(),
             engine::Progress {
                 done: 0,
+                seen: 0,
                 total: 440,
                 started: std::time::Instant::now(),
+                pace_secs: None,
+                last_real: None,
             },
         );
         let joined = render(&a, 80, 24).join("\n");
         assert!(joined.contains("0%"), "not at zero: {joined:?}");
-        assert!(joined.contains("0/440"), "crate count missing: {joined:?}");
+        assert!(
+            joined.contains("0 compiled"),
+            "crate count missing: {joined:?}"
+        );
         assert!(
             joined.contains('░') && !joined.contains('█'),
             "a zero-percent bar must be empty: {joined:?}"
@@ -1136,8 +1218,11 @@ mod tests {
             "photocraft".into(),
             engine::Progress {
                 done: 0,
+                seen: 0,
                 total: 0,
                 started: std::time::Instant::now() - std::time::Duration::from_secs(12),
+                pace_secs: None,
+                last_real: None,
             },
         );
         let joined = render(&a, 80, 24).join("\n");

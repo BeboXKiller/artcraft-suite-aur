@@ -47,9 +47,14 @@ build, install and launch each app without leaving the keyboard.
   the clone, behind a confirmation popup (`y` to confirm).
 - **See before you update** — the bottom pane lists the upstream commits an
   update would pull (or the live build log while a task runs).
+- **Honest "up to date"** — the install is judged against the clone it was
+  built from: each build records its revision (older installs compare
+  versions), so a pull whose build was cancelled or failed shows
+  `↻ update ready` instead of claiming currency — and `u` rebuilds it
+  rather than skipping.
 - **Attention filter** — `o` hides everything that is fine (up to date); only
-  missing, behind, not-checked, or failed apps remain, with the header badge
-  saying so.
+  missing, behind, not-checked, stale-install, or failed apps remain, with
+  the header badge saying so.
 - **Expandable app blurbs** — `→` / `←` open and close an indented one-line
   description (the official getartcraft.com blurb) under any row.
 - **Safe by default** — cancel/dequeue with `x`, two-step quit while tasks
@@ -57,20 +62,27 @@ build, install and launch each app without leaving the keyboard.
 - **Clear feedback** — one status row for queued/running/success/error, every
   state as glyph *and* phrase, failed rows tracked until they succeed.
 - **Measured build progress** — while a build runs, the bottom pane shows a
-  real percentage (`43/80` crates) starting from 0% and filling crate by crate,
-  plus a `~`-ETA; a single running task also gets a compact `~2m · 54%` on the
-  status row. The total comes from a real denominator computed before the build:
-  the exact crate count of the previous successful build (persisted per repo),
-  or a `cargo tree` estimate on the first one. If neither is available the pane
-  shows elapsed time instead of a bar, never a guessed percentage.
+  real percentage weighted to work actually done (compiled crates against the
+  units still unresolved), starting from 0% and advancing crate by crate, plus
+  a `~`-ETA derived from the recent per-crate pace; a single running task also
+  gets a compact `~2m · 54%` on the status row. Cached (`fresh`) crates count
+  as resolved, never as progress — so an incremental rebuild's estimate stays
+  in minutes instead of claiming hours. The denominator comes from a real
+  number computed before the build: the exact unit count of the previous
+  successful build (persisted per repo), or a `cargo tree` estimate on the
+  first one. If that estimate runs out mid-build the bar holds at 99% with an
+  `…` ETA rather than lying, and a build with no obtainable denominator shows
+  elapsed time instead of a bar, never a guessed percentage.
 - **Full key reference in-app** — `?` opens a scrollable overlay documenting
   every hint.
 - **Brand theme, honest colour** — ArtCraft palette (the same tokens as
   getartcraft.com) auto-degraded through truecolor → 256 → 16 → mono
   (`NO_COLOR`), light-terminal variant via `ARTCRAFT_THEME=light`.
 - **Plays well with scripts** — `--status` prints one line per app anywhere
-  (pipes, CI); the UI never opens without a real TTY; logs go to
-  `~/.cache/artcraft-suite-aur/`, never onto the terminal.
+  (pipes, CI), the state being `installed`, `stale` (built from an older
+  revision than the clone), `cloned` or `missing`; the UI never opens without
+  a real TTY; logs go to `~/.cache/artcraft-suite-aur/`, never onto the
+  terminal.
 
 ## Requirements
 
@@ -368,13 +380,19 @@ Source layout — concerns are kept separate on purpose:
   integration-tested against a local file remote: a commit lands on the origin
   after the clone, `behind` stays 0 on the stale refs, and
   `git_fetch_bounded` makes the count (and the commit list) real. Build
-  progress is counted from cargo's `--message-format=json` stream: cached
-  (`fresh: true`) crates are skipped so the number is work actually done, and
-  the percentage/ETA math (`Progress::pct`, `Progress::eta_secs`) is asserted
-  against fixed elapsed times. The percentage's denominator is seeded before
-  the build from a persisted exact unit count (or a `cargo tree` estimate),
-  so it starts at 0% and climbs; a build with no obtainable denominator shows
-  elapsed time rather than a bar.
+  progress is counted from cargo's `--message-format=json` stream: every
+  artifact resolves an expected unit, but only non-`fresh` crates count as
+  work done — and only real work (fresh-excluded crates and `build.rs` runs)
+  samples the pace, so cached bursts never deflate the estimate. The
+  percentage/ETA math (`Progress::pct`, `Progress::eta_secs`) is asserted
+  against injected sample timestamps, including the incremental-rebuild
+  regression where the old elapsed-rate formula claimed ~2h for ~10m of work.
+  The percentage's denominator is seeded before the build from a persisted
+  exact unit count (or a `cargo tree`+metadata estimate of first-build
+  units), so it starts at 0%; an
+  exhausted seed holds the bar at 99% with an `…` ETA, and a build with no
+  obtainable denominator shows elapsed time rather than a bar. The line
+  parser itself is fed cargo-shaped lines in a test.
 - **End-to-end** (`scripts/tui_smoke.py`): boots the real binary in a sized pty,
   sends real keys (waiting for the scan *and* the background upstream check —
   the status line reaches `ready` — before the first key),
