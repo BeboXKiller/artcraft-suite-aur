@@ -6,7 +6,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
 
-use crate::components::{AppContext, Component, ComponentEvent};
+use crate::components::{Component, ComponentEvent};
 use crate::theme::{Sty, Tint};
 
 /// Help lines per page — same jump the list's PageUp/PageDown uses.
@@ -64,12 +64,6 @@ impl Component for HelpOverlayComponent {
         }
     }
 
-    fn render(&mut self, frame: &mut Frame, area: Rect, ctx: &AppContext) {
-        if !self.open {
-            return;
-        }
-        render_help_card(frame, area, Sty::new(*ctx.palette), self.scroll);
-    }
 }
 
 /// Full-width modal help card. Kept within 58 columns so nothing wraps on the

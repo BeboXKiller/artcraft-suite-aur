@@ -3,8 +3,7 @@
 //! Step 5 of the refactor. The queue/spawn logic (`try_start`, `start_now`,
 //! `pump`) stays on `App` in this step — it needs the list's clone dirs and
 //! the event sender; this module owns the maps and the pure bookkeeping so
-//! `App` is no longer the state bag. `Component::handle_background` gets
-//! wired here once the trait's consumers exist.
+//! `App` is no longer the state bag.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -17,7 +16,6 @@ pub const DEFAULT_MAX_PARALLEL: usize = 2;
 pub const MIN_JOBS: usize = 1;
 pub const MAX_JOBS: usize = 16;
 
-#[derive(Default)]
 pub struct TaskManager {
     /// repo → verb ("installing"…) of the running task
     pub busy: HashMap<String, String>,
@@ -27,6 +25,18 @@ pub struct TaskManager {
     /// repo → error of the last failed task, until a retry clears it
     pub failed: HashMap<String, String>,
     pub max_parallel: usize,
+}
+
+impl Default for TaskManager {
+    fn default() -> Self {
+        Self {
+            busy: HashMap::new(),
+            progress: HashMap::new(),
+            pending: VecDeque::new(),
+            failed: HashMap::new(),
+            max_parallel: DEFAULT_MAX_PARALLEL,
+        }
+    }
 }
 
 impl TaskManager {
@@ -123,5 +133,13 @@ mod tests {
         assert_eq!(TaskManager::new(0).max_parallel, MIN_JOBS);
         assert_eq!(TaskManager::new(99).max_parallel, MAX_JOBS);
         assert_eq!(TaskManager::new(3).max_parallel, 3);
+    }
+
+    #[test]
+    fn default_has_a_usable_parallel_limit() {
+        let tasks = TaskManager::default();
+        assert_eq!(tasks.max_parallel, DEFAULT_MAX_PARALLEL);
+        assert!(tasks.max_parallel >= MIN_JOBS);
+        assert!(tasks.has_slot());
     }
 }

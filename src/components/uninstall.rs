@@ -29,8 +29,8 @@ impl UninstallConfirmComponent {
     }
 
     /// Centered confirmation card: the names, what goes, how to say yes.
-    /// Takes `apps` as an argument (AppContext stays minimal) — the names
-    /// come from the list's rows. Moved verbatim from `ui::draw_confirm_uninstall`.
+    /// Takes `apps` as an argument so it can render names from the list's rows.
+    /// Moved verbatim from `ui::draw_confirm_uninstall`.
     pub fn render(&self, frame: &mut Frame, area: Rect, s: Sty, apps: &[AppInfo]) {
         let Some(targets) = &self.targets else {
             return;

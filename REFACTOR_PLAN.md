@@ -1,8 +1,7 @@
 # Refactor Plan — Component Architecture
 
-Turns the `App`/`ui.rs` monolith into one file per component behind a
-`Component` trait. Behavior is frozen by `BEHAVIOR_CONTRACT.md`; every step
-diffs against it.
+Split the `App`/`ui.rs` monolith into one file per component. Behavior is
+frozen by `BEHAVIOR_CONTRACT.md`; each step was diffed against it.
 
 ## Ground rules (from the brief, restated)
 
@@ -14,8 +13,8 @@ diffs against it.
    async, no gratuitous generics — concrete structs, static dispatch.
 4. One component per file, under `src/components/`; the task manager lives in
    `src/task/mod.rs`.
-5. `AppContext` stays minimal (palette only). If a component needs data,
-   prefer method arguments over growing `AppContext`.
+5. Components receive cross-component data through explicit arguments or view
+   structs, not a growing app-wide context.
 6. `ui.rs` is deleted at the very end, after every consumer has moved.
 7. `main.rs` keeps its entry behavior; only the two call sites adapt.
 8. All tests survive. Test strategy (decision 1A): adapt in place — same
@@ -35,7 +34,7 @@ diffs against it.
 | `UninstallConfirmComponent` | `components/uninstall.rs` | `confirm_uninstall: Option<Vec<usize>>` | confirm branch of `on_key` (cancel path), `draw_confirm_uninstall` (takes `&[AppInfo]` as an argument) |
 | `JobsPopupComponent` | `components/jobs.rs` | `jobs_popup: bool`, `jobs_scratch: usize` | jobs branch of `on_key`, the scratch→`max_parallel` math, `draw_jobs_popup` |
 | `ListComponent` | `components/list.rs` | `apps`, `sel`, `picks`, `filter_attention`, `expanded` | `visible_rows`, `needs_attention`, `move_sel`, `clamp_selection`, `pick_one`, `pick_toggle`, `row_label`, `targets`, `draw_list`, `row_state`, `behind_*`, `pad`, `clip`. **Amended (step 4c):** `enter`/`enter_many` stay on `App` — they are task orchestration (launch, `try_start`, busy/queue math), not list state |
-| `TaskManager` | `task/mod.rs` | `busy`, `progress`, `pending`, `failed`, `max_parallel` (+ `DEFAULT_MAX_PARALLEL`/`MIN_JOBS`/`MAX_JOBS`, re-exported from `app`) | `is_staged`, `has_slot`, `finish` (Done-event bookkeeping). **Amended (step 5):** `try_start`/`start_now`/`pump` stay on `App` — they need the list's clone dirs, `track` and the event sender; they delegate to the TaskManager helpers. `cancel_selected` stays on `App` (needs list targets). `handle_background(Ev)` wiring deferred until the trait's consumers exist. `App` exposes the maps as `app.tasks.*`; thin `App::is_staged` wrapper kept |
+| `TaskManager` | `task/mod.rs` | `busy`, `progress`, `pending`, `failed`, `max_parallel` (+ `DEFAULT_MAX_PARALLEL`/`MIN_JOBS`/`MAX_JOBS`, re-exported from `app`) | `is_staged`, `has_slot`, `finish` (Done-event bookkeeping). **Amended (step 5):** `try_start`/`start_now`/`pump` stay on `App` — they need the list's clone dirs, `track` and the event sender; they delegate to the TaskManager helpers. `cancel_selected` stays on `App` (needs list targets). `App` exposes the maps as `app.tasks.*`; thin `App::is_staged` wrapper kept |
 | `DetailsComponent` | `components/details.rs` | `log`, `log_repo`, `log_len` | `refresh_log`, `draw_details`, `details_for`, `progress_line`, `tail_lines`, `short_dir`. **Amended (step 6):** `render` takes `Option<&AppInfo>` + `&TaskManager` + `Track` (data as args); `App` keeps a thin `refresh_log` wrapper that picks the selected repo |
 | `HeaderComponent` | `components/header.rs` | — (read-only) | header block build, `summary`. **Amended (step 7):** render takes a `HeaderView` struct (`status`/`tone`/`apps`/`filter_attention`/`track`/`tasks`); `App` keeps `status_line` |
 | `KeyBarComponent` | `components/keybar.rs` | — (read-only) | `key_bar` as `lines(s)` + `render`. **Amended (step 7):** file named `keybar.rs` to match sibling module naming |
@@ -55,98 +54,39 @@ Stays on `App` (coordinator): `msg`, `quit`, `confirm_quit`, `track`,
    receive its events.
 6. `DetailsComponent` — log cache + details pane.
 7. `HeaderComponent` + `KeyBarComponent` — read-only views.
-8. ~~Delete `src/ui.rs`; `App::render` becomes the single frame entry point~~
-   **done (step 8):** layout shell + remaining full-frame tests move into
-   `App::render`/`app.rs`; `main.rs` calls `app.render(f)`; `mod ui;` dropped.
-   `AppContext`/trait-`render`/`handle_background` remain as documented
-   scaffolding (components paint via inherent methods with explicit data —
-   decision 2 held).
-8. Delete `ui.rs`, remove `mod ui;`, final green sweep.
+8. **Complete:** deleted `src/ui.rs`; moved the layout shell and remaining
+   full-frame tests into `App::render`/`app.rs`; changed `main.rs` to call
+   `app.render(f)` and removed `mod ui;`.
 
 Overlays come first because they are leaves; list before tasks because tasks
-consume the list's targets; `ui.rs` dies last.
+consume the list's targets; `ui.rs` was deleted after its consumers moved.
 
-## `src/components/mod.rs` (the real code, not a sketch)
+## Component interface
 
-```rust
-use crossterm::event::KeyEvent;
-use ratatui::Frame;
-use ratatui::layout::Rect;
-
-use crate::engine::{Action, Ev};
-use crate::theme::Palette;
-
-pub struct AppContext<'a> {
-    pub palette: &'a Palette,
-}
-
-#[derive(Debug)]
-pub enum ComponentEvent {
-    Ignored,
-    /// Set the status-line message.
-    Msg(String),
-    /// Apply this action to the list's current targets (picks or sel).
-    RequestAction(Action),
-    /// Uninstall the current targets (App computes eligibility).
-    UninstallRequest,
-    /// Confirm the pending uninstall (`y`).
-    UninstallConfirm,
-    /// Open the parallel-builds popup.
-    JobsOpen,
-    /// Adopt the popup's scratch limit (`Enter` in the `p` editor).
-    JobsApply,
-    /// Full rescan (`r`) — App owns the pipeline.
-    Rescan,
-    /// Flip the track (`t`) and rescan.
-    ToggleTrack,
-    /// Launch the selected installed app; App resolves the package.
-    Launch,
-    /// Two-step quit request.
-    RequestQuit,
-    OpenOverlay(OverlayKind),
-    CloseOverlay,
-    Quit,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum OverlayKind {
-    Help,
-    UninstallConfirm,
-    JobsPopup,
-}
-
-pub trait Component {
-    fn handle_key(&mut self, _key: KeyEvent) -> ComponentEvent {
-        ComponentEvent::Ignored
-    }
-    fn handle_background(&mut self, _ev: &Ev) {}
-    fn render(&mut self, _frame: &mut Frame, _area: Rect, _ctx: &AppContext) {}
-}
-```
+`Component` provides the `handle_key` seam used by help, jobs, and uninstall
+confirmation. Its event enum contains only outcomes those handlers return
+(`Ignored`, `Msg`, `JobsApply`, and `CloseOverlay`). `App` retains overall key
+routing and task orchestration. Rendering uses concrete methods and explicit
+data arguments/view structs rather than a shared render context.
 
 ## Justified deviations from the brief's sketch
 
-1. **No `active_overlay: Option<OverlayKind>` on `App`.** Discovery proved the
+1. **No `active_overlay` on `App`.** Discovery proved the
    three overlay states are independent today (`show_help`,
    `confirm_uninstall`, `jobs_popup` can be simultaneously true; paint order
    and key precedence are fixed). `App::on_key` routes in the exact order
    Ctrl > `?` > help > jobs > uninstall-confirm > normal, and `App::render`
    paints help < uninstall < jobs. Each overlay component owns its own
-   open/scroll/target state; `OverlayKind` is retained in `mod.rs` only as the
-   payload of `OpenOverlay`/`CloseOverlay` events.
-2. **`ComponentEvent` grows the variants shown above.** Every key path in the
-   contract produces a message, a rescan, an uninstall, a jobs-popup open, or
-   a quit request; the sketch's four variants cannot carry them.
-3. **`AppContext` stays exactly `{ palette }`.** Components that need more
-   take method arguments instead: `UninstallConfirmComponent::render` takes
-   `&[AppInfo]`; list rendering receives the task state via arguments from
-   `App::render`; header receives the composed status string. This follows the
-   brief's own rule ("prefer method arguments over stuffing it into
-   AppContext").
-4. **The `Component` trait is used where it fits (overlays); richer inherent
-   methods cover the data-heavy components.** `App::render` calls each
-   component's concrete method with the arguments it actually needs — static
-   dispatch, no `dyn`, per ground rule 3.
+   open/scroll/target state.
+2. **`ComponentEvent` is intentionally narrow.** It carries only outcomes
+   returned by component-owned key handling; `App` keeps the remaining key
+   actions and orchestration.
+3. **Data is passed explicitly.** Uninstall rendering takes `&[AppInfo]`;
+   list rendering takes task state; header rendering receives a `HeaderView`;
+   details rendering receives the selected app and task state.
+4. **The trait covers key handling only.** Component-specific render methods
+   have distinct data requirements, so `App::render` calls their concrete
+   methods directly — static dispatch, no `dyn`, per ground rule 3.
 
 ## Final `App`
 
@@ -170,10 +110,9 @@ pub struct App {
 }
 ```
 
-`App::on_key` keeps the exact routing order; each branch delegates to the
-component and applies the returned `ComponentEvent` using the *existing*
-method bodies (`start_action`, `enter`, `request_quit`, …), kept largely intact
-on `App`/`TaskManager` so message strings and edge cases do not drift.
+`App::on_key` keeps the exact routing order; component-owned key state
+delegates through `Component::handle_key`, while task actions and app-wide
+orchestration remain on `App` so message strings and edge cases do not drift.
 `App::render` keeps the min-size gate, the four-row layout, the header/list/
 details/key-bar paint, and the three overlays in today's order. `main.rs`
 changes: drop `mod ui;`, replace `ui::draw(f, app)` with `app.render(f)`.
@@ -192,8 +131,7 @@ changes: drop `mod ui;`, replace `ui::draw(f, app)` with `app.render(f)`.
 - [ ] Net change > 200 lines ⇒ split the step before committing.
 - [ ] Deviation from this plan ⇒ update this file, then report and stop.
 
-## Final sweep (step 8)
+## Final sweep (completed)
 
-- Delete `src/ui.rs`, remove `mod ui;` from `main.rs`.
-- Full verification: fmt, clippy `-D warnings`, 101 tests, smoke exit 0.
-- Update `REFACTOR_PLAN.md` checkboxes; report the finished state.
+- `src/ui.rs` was deleted and `mod ui;` removed from `main.rs`.
+- Full verification passed: fmt, clippy `-D warnings`, 114 tests, smoke exit 0.
