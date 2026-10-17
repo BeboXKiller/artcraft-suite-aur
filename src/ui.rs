@@ -1,21 +1,19 @@
 //! Layout and widgets: header, suite list, details pane, key bar, help overlay.
+//! The list, details, and overlay widgets live in `crate::components`; this
+//! module keeps the frame layout and the header/key-bar until step 8.
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::layout::{Alignment, Constraint, Layout};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 
 use crate::app::{App, Tone};
-use crate::components::list::{behind_word, clip};
-use crate::engine::{self, AppInfo, Track};
+use crate::engine::Track;
 use crate::theme::{Sty, Tint};
 
 /// Smallest grid this layout is designed for; below it we show a polite message.
 const MIN_WIDTH: u16 = 60;
 const MIN_HEIGHT: u16 = 15;
-/// Detail lines kept visible in the bottom pane (the block is `Length(7)`).
-const DETAIL_LINES: usize = 5;
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
@@ -77,7 +75,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
             track: app.track,
         },
     );
-    draw_details(frame, app, tail, s);
+    app.details.render(
+        frame,
+        tail,
+        s,
+        app.list.apps.get(app.list.sel),
+        &app.tasks,
+        app.track,
+    );
     frame.render_widget(
         Paragraph::new(key_bar(s)).alignment(Alignment::Center),
         keys_row,
@@ -145,248 +150,6 @@ fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
     spans
 }
 
-/// The bottom pane: the live log while a task runs, the update's contents
-/// otherwise — what the next `u` would actually bring.
-fn draw_details(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
-    let width = area.width.saturating_sub(4) as usize;
-    let Some(a) = app.list.apps.get(app.list.sel) else {
-        frame.render_widget(
-            Paragraph::new(" nothing to show — no apps scanned ")
-                .block(Block::bordered().title(" Details ")),
-            area,
-        );
-        return;
-    };
-    let (title, lines) = details_for(app, a, s, width);
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(title)),
-        area,
-    );
-}
-
-fn details_for<'a>(app: &App, a: &AppInfo, s: Sty, width: usize) -> (String, Vec<Line<'a>>) {
-    let repo = a.repo;
-    if let Some(verb) = app.tasks.busy.get(repo) {
-        let title = format!(" {verb} — {repo} ");
-        let mut lines = Vec::new();
-        if let Some(p) = app.tasks.progress.get(repo) {
-            lines.push(progress_line(p, s, width));
-        }
-        lines.extend(tail_lines(
-            &app.log,
-            s.fg(Tint::Muted),
-            width,
-            "(waiting for output…)",
-        ));
-        return (title, lines);
-    }
-    if let Some(err) = app.tasks.failed.get(repo) {
-        let title = format!(" ✗ {repo} — build failed ");
-        let mut lines = vec![Line::from(Span::styled(format!(" {err}"), s.fg(Tint::Bad)))];
-        lines.extend(tail_lines(
-            &app.log,
-            s.fg(Tint::Muted),
-            width,
-            "(no log kept)",
-        ));
-        lines.push(Line::from(Span::styled(
-            " x clears · r rescans · i retries",
-            s.fg(Tint::Faint),
-        )));
-        return (title, lines);
-    }
-    let (title, mut lines) = match a.behind {
-        Some(n) if n > 0 => {
-            let title = format!(" What's new in {repo} ");
-            let version = a.version.as_deref().unwrap_or("no version");
-            let mut lines = vec![Line::from(Span::styled(
-                format!(" {version} · {n} {} to pull", behind_word(app.track, n)),
-                s.fg(Tint::Warn).bold(),
-            ))];
-            if a.commits.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    match app.track {
-                        Track::Commits => " (commit list unknown — f refreshes)",
-                        Track::Releases => " (release list unknown — f refreshes)",
-                    },
-                    s.fg(Tint::Faint),
-                )));
-            }
-            for c in a.commits.iter().take(DETAIL_LINES) {
-                lines.push(Line::from(Span::styled(
-                    format!(" {}", clip(c, width.saturating_sub(2))),
-                    s.fg(Tint::Muted),
-                )));
-            }
-            let more = a.commits.len().saturating_sub(DETAIL_LINES);
-            let hint = if more > 0 {
-                format!("+{more} more · f refreshes · u updates")
-            } else {
-                "f refreshes · u updates".to_string()
-            };
-            lines.push(Line::from(Span::styled(
-                format!(" {hint}"),
-                s.fg(Tint::Faint),
-            )));
-            (title, lines)
-        }
-        // the clone is current but the binary predates it: a pull whose
-        // build never finished. There is nothing to pull — the update is
-        // already on disk, waiting to be rebuilt.
-        _ if a.installed && a.cloned && a.stale => {
-            let version = a.version.as_deref().unwrap_or("no version");
-            (
-                format!(" {repo} — update ready "),
-                vec![
-                    Line::from(Span::styled(
-                        format!(" {version} · source is newer than the install"),
-                        s.fg(Tint::Warn),
-                    )),
-                    Line::from(Span::styled(
-                        " u rebuilds it · Enter launches the installed one",
-                        s.fg(Tint::Faint),
-                    )),
-                ],
-            )
-        }
-        _ if a.installed && !a.cloned => {
-            let version = a.version.as_deref().unwrap_or("no version");
-            (
-                format!(" {repo} — installed, no clone "),
-                vec![
-                    Line::from(Span::styled(
-                        format!(" {version} · binary found, source not here"),
-                        s.fg(Tint::Good),
-                    )),
-                    Line::from(Span::styled(
-                        " Enter launches · i clones and builds it",
-                        s.fg(Tint::Faint),
-                    )),
-                ],
-            )
-        }
-        _ if a.installed && a.behind.is_none() => {
-            let version = a.version.as_deref().unwrap_or("no version");
-            (
-                format!(" {repo} — not checked "),
-                vec![
-                    Line::from(Span::styled(
-                        format!(" {version} · upstream not checked"),
-                        s.fg(Tint::Muted),
-                    )),
-                    Line::from(Span::styled(
-                        " f fetches · u updates · Enter launches",
-                        s.fg(Tint::Faint),
-                    )),
-                ],
-            )
-        }
-        _ if a.installed => {
-            let version = a.version.as_deref().unwrap_or("no version");
-            (
-                format!(" {repo} — up to date "),
-                vec![
-                    Line::from(Span::styled(
-                        format!(" {version} · nothing to pull"),
-                        s.fg(Tint::Good),
-                    )),
-                    Line::from(Span::styled(
-                        " Enter launches · u updates · i reinstalls",
-                        s.fg(Tint::Faint),
-                    )),
-                ],
-            )
-        }
-        _ if a.cloned => (
-            format!(" {repo} — cloned, not built "),
-            vec![Line::from(Span::styled(
-                " i builds and installs it",
-                s.fg(Tint::Faint),
-            ))],
-        ),
-        _ => (
-            format!(" {repo} — not installed "),
-            vec![Line::from(Span::styled(
-                " i clones and builds it",
-                s.fg(Tint::Faint),
-            ))],
-        ),
-    };
-    // Footer: where the clone lives (auto-discovered paths differ from
-    // `~/<repo>`) and whether a desktop entry is registered — the two facts a
-    // bare row can't show.
-    let menu = if a.menu {
-        "in app menu"
-    } else {
-        "no menu entry"
-    };
-    let room = width.saturating_sub(menu.len() + 4);
-    lines.push(Line::from(Span::styled(
-        format!(" {} · {}", clip(&short_dir(&a.dir), room), menu),
-        s.fg(Tint::Faint),
-    )));
-    (title, lines)
-}
-
-/// The clone path with `$HOME` shortened to `~`, for the details footer.
-fn short_dir(dir: &std::path::Path) -> String {
-    let home = crate::engine::home_dir();
-    if let Ok(rest) = dir.strip_prefix(&home)
-        && !rest.as_os_str().is_empty()
-    {
-        return format!("~/{}", rest.display());
-    }
-    dir.display().to_string()
-}
-
-/// The selected build's progress bar and its numbers, above the live log.
-fn progress_line<'a>(p: &engine::Progress, s: Sty, width: usize) -> Line<'a> {
-    match (p.pct(), p.eta_secs()) {
-        (Some(pct), eta) => {
-            // Keep bar + numbers inside the pane even when it's narrow.
-            let eta_str = eta.map_or_else(|| "…".into(), crate::app::coarse_eta);
-            let text = format!("{pct}% · {eta_str} left · {} compiled", p.done);
-            let bar_w = width.saturating_sub(text.chars().count() + 3).max(4);
-            let filled = bar_w * pct as usize / 100;
-            let bar: String = "█".repeat(filled) + &"░".repeat(bar_w - filled);
-            Line::from(vec![
-                Span::styled(format!(" {bar} "), s.fg(Tint::Accent)),
-                Span::styled(text, s.fg(Tint::Muted)),
-            ])
-        }
-        // No denominator (the pre-build crate count couldn't be obtained):
-        // show elapsed time rather than a bar that would be a guess.
-        (None, _) => Line::from(Span::styled(
-            format!(
-                " building… {} elapsed",
-                crate::app::coarse_eta(p.elapsed_secs())
-            ),
-            s.fg(Tint::Muted),
-        )),
-    }
-}
-
-fn tail_lines<'a>(
-    log: &[String],
-    style: Style,
-    width: usize,
-    empty: &'static str,
-) -> Vec<Line<'a>> {
-    if log.is_empty() {
-        return vec![Line::from(Span::styled(format!(" {empty}"), style))];
-    }
-    let start = log.len().saturating_sub(DETAIL_LINES);
-    log[start..]
-        .iter()
-        .map(|l| {
-            Line::from(Span::styled(
-                format!(" {}", clip(l, width.saturating_sub(2))),
-                style,
-            ))
-        })
-        .collect()
-}
-
 fn key_bar(s: Sty) -> Vec<Line<'static>> {
     let c = s.fg(Tint::Accent);
     vec![
@@ -439,6 +202,7 @@ fn key_bar(s: Sty) -> Vec<Line<'static>> {
 mod tests {
     use super::*;
     use crate::app::App;
+    use crate::engine::AppInfo;
     use crate::theme::{Depth, Palette};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -740,20 +504,6 @@ mod tests {
         let head = render(&a, 80, 24)[0].clone();
         assert!(head.contains("⚑ releases"), "badge missing: {head:?}");
     }
-
-    #[test]
-    fn details_pane_lists_release_tags() {
-        let mut a = app();
-        a.track = Track::Releases;
-        let mut b = app_info("wordcraft", true, true, Some(2));
-        b.commits = vec!["v0.14.0".into(), "v0.15.0".into()];
-        a.list.apps.push(b);
-        a.list.sel = 1;
-        let joined = render(&a, 80, 24).join("\n");
-        assert!(joined.contains("2 releases to pull"), "{joined:?}");
-        assert!(joined.contains("v0.15.0"), "{joined:?}");
-    }
-
     #[test]
     fn a_three_digit_behind_count_keeps_the_phrase_and_glyph_intact() {
         // At 3 digits "100 commits behind" is 18 chars and the glyph is
@@ -776,144 +526,6 @@ mod tests {
         assert!(
             row.chars().count() <= 80,
             "row wider than the screen: {row:?}"
-        );
-    }
-
-    #[test]
-    fn details_pane_shows_what_the_update_contains() {
-        let mut a = app();
-        let mut b = app_info("wordcraft", true, true, Some(2));
-        b.commits = vec![
-            "abc1234 fix table borders".into(),
-            "def5678 faster previews".into(),
-        ];
-        a.list.apps.push(b);
-        a.list.sel = 1;
-        let rows = render(&a, 80, 24);
-        let joined = rows.join("\n");
-        assert!(joined.contains("What's new in wordcraft"), "{joined:?}");
-        assert!(joined.contains("fix table borders"), "{joined:?}");
-        assert!(joined.contains("2 commits to pull"), "{joined:?}");
-    }
-
-    #[test]
-    fn details_pane_shows_the_live_log_while_busy() {
-        let mut a = app();
-        a.tasks
-            .busy
-            .insert("photocraft".into(), "installing".into());
-        a.log = vec!["   Compiling photocraft v0.5.0".into()];
-        let rows = render(&a, 80, 24);
-        let joined = rows.join("\n");
-        assert!(joined.contains("installing — photocraft"), "{joined:?}");
-        assert!(joined.contains("Compiling photocraft"), "{joined:?}");
-    }
-
-    #[test]
-    fn details_footer_reports_where_the_clone_lives_and_the_menu_state() {
-        // the fixture is menu-registered but lives outside $HOME
-        let rows = render(&app(), 100, 30);
-        let joined = rows.join("\n");
-        assert!(joined.contains("in app menu"), "{joined:?}");
-        assert!(
-            joined.contains("/nonexistent"),
-            "a discovered clone path must be visible: {joined:?}"
-        );
-
-        let a = App::with_apps(vec![app_info("cadcraft", false, false, None)]);
-        let rows = render(&a, 100, 30);
-        assert!(
-            rows.iter().any(|r| r.contains("no menu entry")),
-            "a missing menu entry must be stated: {rows:?}"
-        );
-    }
-
-    #[test]
-    fn a_building_row_shows_a_bar_and_a_tilde_eta() {
-        // A cold build at 43 of 80 expected crates, two minutes ago: honest
-        // numbers, and the ETA is prefixed with `~` so it never reads as a
-        // countdown.
-        let mut a = app();
-        a.tasks.busy.insert("photocraft".into(), "building".into());
-        a.tasks.progress.insert(
-            "photocraft".into(),
-            engine::Progress {
-                done: 43,
-                seen: 43,
-                total: 80,
-                started: std::time::Instant::now() - std::time::Duration::from_secs(130),
-                // 37 unresolved × 2s per crate → ~1m left.
-                pace_secs: Some(2.0),
-                last_real: Some(std::time::Instant::now()),
-            },
-        );
-        let rows = render(&a, 80, 24);
-        let joined = rows.join("\n");
-        assert!(joined.contains("building — photocraft"), "{joined:?}");
-        assert!(joined.contains("█"), "no filled bar cell: {joined:?}");
-        assert!(joined.contains("53%"), "wrong percentage: {joined:?}");
-        assert!(
-            joined.contains("43 compiled"),
-            "crate count missing: {joined:?}"
-        );
-        assert!(
-            joined.contains('~'),
-            "an ETA must read as an estimate: {joined:?}"
-        );
-    }
-
-    #[test]
-    fn a_build_starts_at_zero_with_an_empty_bar_not_a_full_one() {
-        // The reported bug: the bar was pinned at 100% from the first crate
-        // because the denominator was set equal to the count. A seeded build
-        // must start at 0% with an empty bar and fill in from there.
-        let mut a = app();
-        a.tasks.busy.insert("photocraft".into(), "building".into());
-        a.tasks.progress.insert(
-            "photocraft".into(),
-            engine::Progress {
-                done: 0,
-                seen: 0,
-                total: 440,
-                started: std::time::Instant::now(),
-                pace_secs: None,
-                last_real: None,
-            },
-        );
-        let joined = render(&a, 80, 24).join("\n");
-        assert!(joined.contains("0%"), "not at zero: {joined:?}");
-        assert!(
-            joined.contains("0 compiled"),
-            "crate count missing: {joined:?}"
-        );
-        assert!(
-            joined.contains('░') && !joined.contains('█'),
-            "a zero-percent bar must be empty: {joined:?}"
-        );
-    }
-
-    #[test]
-    fn a_build_with_no_denominator_shows_elapsed_not_a_fake_percent() {
-        // The denominator couldn't be obtained: there is no honest percentage,
-        // so show elapsed time rather than a bar that would be a guess.
-        let mut a = app();
-        a.tasks.busy.insert("photocraft".into(), "building".into());
-        a.tasks.progress.insert(
-            "photocraft".into(),
-            engine::Progress {
-                done: 0,
-                seen: 0,
-                total: 0,
-                started: std::time::Instant::now() - std::time::Duration::from_secs(12),
-                pace_secs: None,
-                last_real: None,
-            },
-        );
-        let joined = render(&a, 80, 24).join("\n");
-        assert!(joined.contains("elapsed"), "{joined:?}");
-        assert!(
-            !joined.contains('%'),
-            "no percentage without a total: {joined:?}"
         );
     }
 

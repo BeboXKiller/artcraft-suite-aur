@@ -12,10 +12,12 @@ use ratatui::layout::Rect;
 use crate::engine::{Action, Ev};
 use crate::theme::Palette;
 
+pub mod details;
 pub mod help;
 pub mod jobs;
 pub mod list;
 pub mod uninstall;
+pub use details::DetailsComponent;
 pub use help::HelpOverlayComponent;
 pub use jobs::JobsPopupComponent;
 pub use list::ListComponent;

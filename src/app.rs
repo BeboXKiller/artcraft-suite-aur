@@ -7,8 +7,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::components::{
-    Component, ComponentEvent, HelpOverlayComponent, JobsPopupComponent, ListComponent,
-    UninstallConfirmComponent,
+    Component, ComponentEvent, DetailsComponent, HelpOverlayComponent, JobsPopupComponent,
+    ListComponent, UninstallConfirmComponent,
 };
 use crate::engine::{self, Action, AppInfo, Ev, Track};
 use crate::task::TaskManager;
@@ -18,8 +18,6 @@ pub use crate::task::{DEFAULT_MAX_PARALLEL, MAX_JOBS, MIN_JOBS};
 
 /// Rows a PageUp/PageDown jumps; close to a typical list viewport height.
 const PAGE: usize = 10;
-/// Bytes of build log cached for the tail pane.
-const LOG_BYTES: u64 = 4096;
 
 /// The status line's tone, derived from the message prefix (`✓` / `✗`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,10 +72,8 @@ pub struct App {
     pub uninstall: UninstallConfirmComponent,
     /// `p` popup: editor state for the parallel-build limit
     pub jobs: JobsPopupComponent,
-    /// Tail of the selected repo's log, refreshed by [`Self::refresh_log`].
-    pub log: Vec<String>,
-    log_repo: &'static str,
-    log_len: u64,
+    /// The bottom pane's cached log tail and details content.
+    pub details: DetailsComponent,
     /// true until the first background scan delivers its rows
     scanning: bool,
     tx: Sender<Ev>,
@@ -96,9 +92,7 @@ impl App {
             confirm_quit: false,
             uninstall: UninstallConfirmComponent::default(),
             jobs: JobsPopupComponent::default(),
-            log: Vec::new(),
-            log_repo: "",
-            log_len: 0,
+            details: DetailsComponent::default(),
             scanning: true,
             tx,
         };
@@ -163,21 +157,11 @@ impl App {
 
     /// Cache the log tail for the selected repo.
     ///
-    /// Called once per loop: a `stat` per tick, re-read only when the file or the
-    /// selection changed, so rendering stays a pure function of state.
+    /// Called once per loop by the main loop; the stat-gate lives in
+    /// [`DetailsComponent::refresh_log`].
     pub fn refresh_log(&mut self) {
         let repo = self.list.apps.get(self.list.sel).map_or("", |a| a.repo);
-        let len = std::fs::metadata(engine::log_file(repo))
-            .map(|m| m.len())
-            .unwrap_or(0);
-        if repo == self.log_repo && len == self.log_len {
-            return;
-        }
-        self.log_repo = repo;
-        self.log_len = len;
-        self.log = engine::log_tail(repo, LOG_BYTES)
-            .map(|t| t.lines().map(str::to_string).collect())
-            .unwrap_or_default();
+        self.details.refresh_log(repo);
     }
 
     /// What the status row says, and how loud it should look.
@@ -789,9 +773,7 @@ impl App {
                 open: false,
                 scratch: DEFAULT_MAX_PARALLEL,
             },
-            log: Vec::new(),
-            log_repo: "",
-            log_len: 0,
+            details: DetailsComponent::default(),
             scanning: false,
             tx,
         }
