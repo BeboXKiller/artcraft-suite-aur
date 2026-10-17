@@ -40,10 +40,15 @@ impl JobsPopupComponent {
         }
         let lines: Vec<Line> = vec![
             Line::from(""),
-            Line::from(Span::styled(
-                format!("  {}", self.scratch),
-                s.fg(Tint::Accent).bold(),
-            )),
+            // bracketed like a field you can edit, number highlighted,
+            // range spelled out so nobody has to guess the ceiling
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("[ ", s.fg(Tint::Faint)),
+                Span::styled(self.scratch.to_string(), s.hl().bold()),
+                Span::styled(" ]", s.fg(Tint::Faint)),
+                Span::styled(format!("  ({}–{})", MIN_JOBS, MAX_JOBS), s.fg(Tint::Muted)),
+            ]),
             Line::from(""),
             Line::from("  apps compiling at once."),
             Line::from(Span::styled(
@@ -235,6 +240,12 @@ mod tests {
         assert!(joined.contains("apps compiling at once."), "{joined:?}");
         assert!(joined.contains("Low-spec PC? Stick to 1–2."), "{joined:?}");
         assert!(joined.contains("Enter applies · Esc cancels"), "{joined:?}");
+        // the value reads as an editable field with its range spelled out
+        assert!(joined.contains("[ 5 ]"), "bracketed value: {joined:?}");
+        assert!(
+            joined.contains(&format!("({}–{})", MIN_JOBS, MAX_JOBS)),
+            "range hint missing: {joined:?}"
+        );
         // the card is small: the key bar stays readable around it
         assert!(
             joined.contains("[q] quit"),
