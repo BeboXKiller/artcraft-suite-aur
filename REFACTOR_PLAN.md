@@ -34,7 +34,7 @@ diffs against it.
 | `HelpOverlayComponent` | `components/help.rs` | `show_help: bool`, `help_scroll: usize` | help branch of `on_key`, `draw_help` |
 | `UninstallConfirmComponent` | `components/uninstall.rs` | `confirm_uninstall: Option<Vec<usize>>` | confirm branch of `on_key` (cancel path), `draw_confirm_uninstall` (takes `&[AppInfo]` as an argument) |
 | `JobsPopupComponent` | `components/jobs.rs` | `jobs_popup: bool`, `jobs_scratch: usize` | jobs branch of `on_key`, the scratch→`max_parallel` math, `draw_jobs_popup` |
-| `ListComponent` | `components/list.rs` | `apps`, `sel`, `picks`, `filter_attention`, `expanded` | `visible_rows`, `needs_attention`, `move_sel`, `clamp_selection`, `pick_one`, `pick_toggle`, `row_label`, `targets`, the decision halves of `enter`/`enter_many` (returning events), `draw_list`, `row_state`, `behind_*`, `pad`, `clip` |
+| `ListComponent` | `components/list.rs` | `apps`, `sel`, `picks`, `filter_attention`, `expanded` | `visible_rows`, `needs_attention`, `move_sel`, `clamp_selection`, `pick_one`, `pick_toggle`, `row_label`, `targets`, `draw_list`, `row_state`, `behind_*`, `pad`, `clip`. **Amended (step 4c):** `enter`/`enter_many` stay on `App` — they are task orchestration (launch, `try_start`, busy/queue math), not list state |
 | `TaskManager` | `task/mod.rs` | `busy`, `progress`, `pending`, `failed`, `max_parallel` | `try_start`, `start_now`, `pump`, `is_staged`, `cancel_selected`, the uninstall loop, status-data prep, `handle_background(Ev)` |
 | `DetailsComponent` | `components/details.rs` | `log`, `log_repo`, `log_len` | `refresh_log`, `draw_details`, `details_for`, `progress_line`, `tail_lines`, `short_dir` |
 | `HeaderComponent` | `components/header.rs` | — (read-only) | header block build, `summary` |

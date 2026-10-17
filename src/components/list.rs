@@ -13,6 +13,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, ListState};
 
+use crate::components::ComponentEvent;
 use crate::engine::{self, Action, AppInfo, Track};
 use crate::theme::{Sty, Tint};
 
@@ -105,6 +106,31 @@ impl ListComponent {
             let mut v: Vec<usize> = self.picks.iter().copied().collect();
             v.sort_unstable();
             v
+        }
+    }
+
+    /// `Space`: pick just this row; pressing it again on the only pick clears
+    /// it. Returns the status message for App to apply.
+    pub fn pick_one(&mut self) -> ComponentEvent {
+        if self.picks.len() == 1 && self.picks.contains(&self.sel) {
+            self.picks.clear();
+            ComponentEvent::Msg("picks cleared".into())
+        } else {
+            self.picks.clear();
+            self.picks.insert(self.sel);
+            ComponentEvent::Msg(format!("picked {}", self.row_label(self.sel)))
+        }
+    }
+
+    /// `Ctrl+Space`: add or remove this row from the picked set. Returns the
+    /// status message for App to apply.
+    pub fn pick_toggle(&mut self) -> ComponentEvent {
+        let label = self.row_label(self.sel);
+        if self.picks.remove(&self.sel) {
+            ComponentEvent::Msg(format!("unpicked {label} ({} left)", self.picks.len()))
+        } else {
+            self.picks.insert(self.sel);
+            ComponentEvent::Msg(format!("picked {label} ({} total)", self.picks.len()))
         }
     }
 
@@ -420,5 +446,46 @@ mod tests {
         assert_eq!(pad("abc", 6), "abc   ");
         assert_eq!(pad("abcdef", 4), "abc…");
         assert_eq!(pad("abc", 3), "abc");
+    }
+
+    #[test]
+    fn pick_one_replaces_the_set_and_toggles_the_sole_pick_off() {
+        let mut l = ListComponent {
+            apps: vec![info("a", false, false, None), info("b", false, false, None)],
+            sel: 1,
+            ..Default::default()
+        };
+        match l.pick_one() {
+            ComponentEvent::Msg(m) => assert_eq!(m, "picked b"),
+            e => panic!("expected a message, got {e:?}"),
+        }
+        assert_eq!(l.picks, [1usize].into_iter().collect());
+        match l.pick_one() {
+            ComponentEvent::Msg(m) => assert_eq!(m, "picks cleared"),
+            e => panic!("expected a message, got {e:?}"),
+        }
+        assert!(l.picks.is_empty());
+    }
+
+    #[test]
+    fn pick_toggle_adds_and_removes_without_dropping_the_rest() {
+        let mut l = ListComponent {
+            apps: vec![
+                info("a", false, false, None),
+                info("b", false, false, None),
+                info("c", false, false, None),
+            ],
+            ..Default::default()
+        };
+        l.pick_toggle();
+        l.sel = 2;
+        l.pick_toggle();
+        assert_eq!(l.picks, [0usize, 2].into_iter().collect());
+        l.sel = 0;
+        match l.pick_toggle() {
+            ComponentEvent::Msg(m) => assert_eq!(m, "unpicked a (1 left)"),
+            e => panic!("expected a message, got {e:?}"),
+        }
+        assert_eq!(l.picks, [2usize].into_iter().collect());
     }
 }

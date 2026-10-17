@@ -485,24 +485,15 @@ impl App {
 
     /// `Space`: pick just this row; pressing it again on the only pick clears it.
     fn pick_one(&mut self) {
-        if self.list.picks.len() == 1 && self.list.picks.contains(&self.list.sel) {
-            self.list.picks.clear();
-            self.msg = "picks cleared".into();
-        } else {
-            self.list.picks.clear();
-            self.list.picks.insert(self.list.sel);
-            self.msg = format!("picked {}", self.row_label(self.list.sel));
+        if let ComponentEvent::Msg(m) = self.list.pick_one() {
+            self.msg = m;
         }
     }
 
     /// `Ctrl+Space`: add or remove this row from the picked set.
     fn pick_toggle(&mut self) {
-        let label = self.row_label(self.list.sel);
-        if self.list.picks.remove(&self.list.sel) {
-            self.msg = format!("unpicked {label} ({} left)", self.list.picks.len());
-        } else {
-            self.list.picks.insert(self.list.sel);
-            self.msg = format!("picked {label} ({} total)", self.list.picks.len());
+        if let ComponentEvent::Msg(m) = self.list.pick_toggle() {
+            self.msg = m;
         }
     }
 
