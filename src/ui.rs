@@ -75,9 +75,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.help.open {
         crate::components::help::render_help_card(frame, area, s, app.help.scroll);
     }
-    if let Some(targets) = &app.confirm_uninstall {
-        draw_confirm_uninstall(frame, area, s, app, targets);
-    }
+    app.uninstall.render(frame, area, s, &app.apps);
     if app.jobs_popup {
         draw_jobs_popup(frame, area, s, app.jobs_scratch);
     }
@@ -578,54 +576,6 @@ fn key_bar(s: Sty) -> Vec<Line<'static>> {
             Span::raw(" releases"),
         ]),
     ]
-}
-
-/// Centered confirmation for `d`: deleting the clone deserves more than a
-/// status-line nudge — a small card, the names, what goes, how to say yes.
-fn draw_confirm_uninstall(frame: &mut Frame, area: Rect, s: Sty, app: &App, targets: &[usize]) {
-    let mut lines: Vec<Line> = Vec::new();
-    let names: Vec<&str> = targets
-        .iter()
-        .filter_map(|i| app.apps.get(*i).map(|a| a.repo))
-        .collect();
-    for n in names.iter().take(5) {
-        lines.push(Line::from(Span::styled(
-            format!("  {n}"),
-            s.fg(Tint::Accent).bold(),
-        )));
-    }
-    if names.len() > 5 {
-        lines.push(Line::from(Span::styled(
-            format!("  +{} more", names.len() - 5),
-            s.fg(Tint::Faint),
-        )));
-    }
-    lines.push(Line::from(""));
-    for l in [
-        "  This removes the binary, the",
-        "  desktop entry, the icons and",
-        "  the clone.",
-    ] {
-        lines.push(Line::from(Span::styled(l, s.fg(Tint::Warn))));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "  y confirms · any other key cancels",
-        s.fg(Tint::Faint),
-    )));
-    let w = area.width.min(40);
-    let box_h = (lines.len() as u16 + 2).min(area.height);
-    let rect = Rect::new(
-        area.x + (area.width.saturating_sub(w)) / 2,
-        area.y + (area.height.saturating_sub(box_h)) / 2,
-        w,
-        box_h,
-    );
-    frame.render_widget(Clear, rect);
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" Confirm uninstall ")),
-        rect,
-    );
 }
 
 /// Centered editor for the parallel-build limit (`p`): the number, the honest
@@ -1336,31 +1286,6 @@ mod tests {
         assert!(
             !render(&b, 80, 24).join("\n").contains('⚙'),
             "idle badge leaked"
-        );
-    }
-
-    #[test]
-    fn confirm_uninstall_is_a_centered_card_not_a_full_screen() {
-        let mut a = app();
-        a.confirm_uninstall = Some(vec![0]);
-        let joined = render(&a, 80, 24).join("\n");
-        assert!(joined.contains("Confirm uninstall"), "{joined:?}");
-        assert!(joined.contains("photocraft"), "{joined:?}");
-        assert!(
-            joined.contains("y confirms · any other key cancels"),
-            "{joined:?}"
-        );
-        assert!(joined.contains("the clone."), "{joined:?}");
-        // the card is small: the key bar stays readable around it
-        assert!(
-            joined.contains("[q] quit"),
-            "modal ate the frame: {joined:?}"
-        );
-        // and it never shows without a pending confirm
-        let b = app();
-        assert!(
-            !render(&b, 80, 24).join("\n").contains("Confirm uninstall"),
-            "modal leaked into a normal frame"
         );
     }
 

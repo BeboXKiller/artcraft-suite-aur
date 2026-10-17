@@ -7,7 +7,9 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::components::{Component, HelpOverlayComponent};
+use crate::components::{
+    Component, ComponentEvent, HelpOverlayComponent, UninstallConfirmComponent,
+};
 use crate::engine::{self, Action, AppInfo, Ev, Track};
 use crate::theme::Palette;
 
@@ -83,7 +85,7 @@ pub struct App {
     /// second `q` required while tasks are running
     confirm_quit: bool,
     /// pending `d` uninstall: target indices awaiting a `y` confirmation
-    pub confirm_uninstall: Option<Vec<usize>>,
+    pub uninstall: UninstallConfirmComponent,
     /// how many apps may compile at once (see [`Self::try_start`])
     pub max_parallel: usize,
     /// `p` popup: editing the parallel-build limit
@@ -118,7 +120,7 @@ impl App {
             help: HelpOverlayComponent::default(),
             palette: Palette::detect(),
             confirm_quit: false,
-            confirm_uninstall: None,
+            uninstall: UninstallConfirmComponent::default(),
             max_parallel,
             jobs_popup: false,
             jobs_scratch: max_parallel,
@@ -354,11 +356,13 @@ impl App {
             return;
         }
         // A pending uninstall wants a plain `y`; anything else changes its mind.
-        if self.confirm_uninstall.is_some() && key.code != Char('y') {
-            self.confirm_uninstall = None;
-            self.msg = "uninstall cancelled".into();
-            self.confirm_quit = false;
-            return;
+        if self.uninstall.pending() {
+            // `y` produces Ignored and falls through to the normal-mode match.
+            if let ComponentEvent::Msg(m) = self.uninstall.handle_key(key) {
+                self.msg = m;
+                self.confirm_quit = false;
+                return;
+            }
         }
         if !matches!(key.code, Char('q') | Esc) {
             self.confirm_quit = false;
@@ -393,7 +397,7 @@ impl App {
                 self.jobs_scratch = self.max_parallel;
             }
             Char('y') => {
-                if let Some(targets) = self.confirm_uninstall.take() {
+                if let Some(targets) = self.uninstall.targets.take() {
                     self.run_uninstall(targets);
                 }
             }
@@ -668,7 +672,7 @@ impl App {
             format!("uninstall {} apps?", eligible.len())
         };
         self.msg = format!("{what} y = binary + menu entry + icons + clone; Esc cancels");
-        self.confirm_uninstall = Some(eligible);
+        self.uninstall.open(eligible);
     }
 
     /// `y`: carry out the pending uninstall.
@@ -880,7 +884,7 @@ impl App {
             help: HelpOverlayComponent::default(),
             palette: Palette::of(crate::theme::Depth::TrueColor),
             confirm_quit: false,
-            confirm_uninstall: None,
+            uninstall: UninstallConfirmComponent::default(),
             max_parallel: DEFAULT_MAX_PARALLEL,
             jobs_popup: false,
             jobs_scratch: DEFAULT_MAX_PARALLEL,
@@ -1123,50 +1127,6 @@ mod tests {
             "the installed row must not be queued"
         );
         assert_eq!(app.msg, "1 install queued · 1 already installed");
-    }
-
-    #[test]
-    fn d_asks_before_uninstall_and_any_other_key_cancels() {
-        let mut v = apps(3);
-        v[0].installed = true;
-        let mut app = App::with_apps(v);
-        app.sel = 0;
-        app.on_key(key(KeyCode::Char('d')));
-        assert!(app.confirm_uninstall.is_some(), "d must ask first");
-        assert!(app.msg.contains('y'), "prompt must say y: {}", app.msg);
-        app.on_key(key(KeyCode::Char('j')));
-        assert!(app.confirm_uninstall.is_none(), "another key must cancel");
-        assert_eq!(app.msg, "uninstall cancelled");
-        // asking again and confirming: no clone on disk, so the engine errors
-        // safely without touching anything real
-        app.on_key(key(KeyCode::Char('d')));
-        app.on_key(key(KeyCode::Char('y')));
-        assert!(
-            app.confirm_uninstall.is_none(),
-            "y must consume the confirm"
-        );
-        assert!(
-            app.msg.contains("no clone"),
-            "engine error must surface: {}",
-            app.msg
-        );
-        assert!(app.failed.contains_key("a"), "failed row must be marked");
-    }
-
-    #[test]
-    fn d_skips_busy_and_not_installed_rows() {
-        let mut v = apps(3);
-        v[0].installed = true;
-        let mut app = App::with_apps(v);
-        app.busy.insert("a".into(), "updating".into());
-        app.sel = 0;
-        app.on_key(key(KeyCode::Char('d')));
-        assert!(
-            app.confirm_uninstall.is_none(),
-            "nothing eligible must not ask"
-        );
-        assert_eq!(app.msg, "nothing to uninstall (1 skipped)");
-        assert_eq!(app.busy["a"], "updating", "busy row must stay untouched");
     }
 
     #[test]

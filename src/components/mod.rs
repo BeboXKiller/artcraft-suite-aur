@@ -13,7 +13,9 @@ use crate::engine::{Action, Ev};
 use crate::theme::Palette;
 
 pub mod help;
+pub mod uninstall;
 pub use help::HelpOverlayComponent;
+pub use uninstall::UninstallConfirmComponent;
 
 /// Shared read-only context handed to every render. Kept minimal on purpose:
 /// components that need data take it as method arguments instead.
