@@ -977,6 +977,39 @@ mod tests {
     }
 
     #[test]
+    fn empty_attention_filter_explains_itself_inside_the_list() {
+        // every row up to date — the filter has nothing to keep
+        let healthy = || {
+            vec![
+                one("a", true, true, Some(0)),
+                one("b", true, true, Some(0)),
+                one("c", true, true, Some(0)),
+            ]
+        };
+        let mut a = App::with_apps(healthy());
+        a.list.filter_attention = true;
+        a.msg.clear(); // only the pane itself may carry the words
+        let rows = render(&a, 80, 24).join("\n");
+        assert!(
+            rows.contains("nothing needs attention"),
+            "empty pane, no explanation: {rows:?}"
+        );
+        assert!(
+            rows.contains("attention only"),
+            "title cue missing: {rows:?}"
+        );
+
+        // unfiltered: the rows are back and the empty-state line is gone
+        a.list.filter_attention = false;
+        let rows = render(&a, 80, 24).join("\n");
+        assert!(
+            !rows.contains("nothing needs attention"),
+            "empty-state line leaked into a populated list: {rows:?}"
+        );
+        assert!(rows.contains('□'), "rows missing: {rows:?}");
+    }
+
+    #[test]
     fn selection_is_clamped() {
         let mut app = App::with_apps(apps(3));
         app.on_key(key(KeyCode::Up));

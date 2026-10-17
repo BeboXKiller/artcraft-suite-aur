@@ -213,6 +213,15 @@ impl ListComponent {
             }
         }
 
+        // Filtered to nothing: the pane explains itself instead of drawing a
+        // void (the header message fades with the next action; this doesn't).
+        if items.is_empty() && self.filter_attention {
+            items.push(ListItem::new(Line::from(Span::styled(
+                "  nothing needs attention — o shows everything",
+                s.fg(Tint::Muted),
+            ))));
+        }
+
         let mut title = format!(" Apps ({})", vis.len());
         if !self.picks.is_empty() {
             title.push_str(&format!(" · {} picked", self.picks.len()));
