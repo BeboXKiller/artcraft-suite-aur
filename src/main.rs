@@ -17,12 +17,17 @@ artcraft-suite-aur — install, update and launch the Craft App Suite from sourc
 Usage:
   artcraft-suite-aur             Start the interactive UI (requires a terminal)
   artcraft-suite-aur -p N        Start with N parallel builds (default 2)
+  artcraft-suite-aur --releases  Track release tags, not every commit
   artcraft-suite-aur --status    One line per app: repo|state|pkg|version|dir
   artcraft-suite-aur --version   Print the version and exit
   artcraft-suite-aur --help      Show this help
 
 -p / --parallel N (or ARTCRAFT_PARALLEL) sets how many apps compile at once,
 1 to 16 — low-spec machines should stick to 1 or 2.
+
+--releases (or ARTCRAFT_TRACK=releases) measures \"behind\" in release tags
+instead of commits, and updates land on the newest release — for people who
+want stable releases only. Inside the UI press t to toggle.
 
 Inside the UI press ? for the full key reference.
 
@@ -36,6 +41,14 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let parallel = match parallel_from(&args, std::env::var("ARTCRAFT_PARALLEL").ok()) {
         Ok(n) => n,
+        Err(e) => {
+            eprintln!("{e}");
+            eprintln!("Try 'artcraft-suite-aur --help'");
+            std::process::exit(2);
+        }
+    };
+    let track = match track_from(&args, std::env::var("ARTCRAFT_TRACK").ok()) {
+        Ok(t) => t,
         Err(e) => {
             eprintln!("{e}");
             eprintln!("Try 'artcraft-suite-aur --help'");
@@ -72,7 +85,7 @@ fn main() {
         eprintln!("Run it inside a terminal for the interactive UI.");
         return;
     }
-    if let Err(e) = run(parallel) {
+    if let Err(e) = run(parallel, track) {
         eprintln!("artcraft-suite-aur: {e}");
         std::process::exit(1);
     }
@@ -123,6 +136,28 @@ fn parse_parallel(v: &str) -> Result<usize, String> {
     Ok(n)
 }
 
+/// `--releases`; else the `ARTCRAFT_TRACK` value; else commits. The flag
+/// always wins over the environment, like `-p`.
+fn track_from(args: &[String], env: Option<String>) -> Result<engine::Track, String> {
+    if args.iter().any(|a| a == "--releases") {
+        return Ok(engine::Track::Releases);
+    }
+    match env {
+        Some(v) if !v.is_empty() => parse_track(&v),
+        _ => Ok(engine::Track::Commits),
+    }
+}
+
+fn parse_track(v: &str) -> Result<engine::Track, String> {
+    match v.trim().to_ascii_lowercase().as_str() {
+        "releases" | "release" | "tags" => Ok(engine::Track::Releases),
+        "commits" | "commit" => Ok(engine::Track::Commits),
+        _ => Err(format!(
+            "artcraft-suite-aur: bad ARTCRAFT_TRACK value '{v}' (want releases or commits)"
+        )),
+    }
+}
+
 /// The first argument nothing knows about, if any (`-p`/`--parallel` values
 /// are skipped — they are validated by [`parallel_from`] first).
 fn unknown_arg(args: &[String]) -> Option<&str> {
@@ -130,7 +165,7 @@ fn unknown_arg(args: &[String]) -> Option<&str> {
     while i < args.len() {
         let a = args[i].as_str();
         match a {
-            "--help" | "-h" | "--version" | "-V" | "--status" => i += 1,
+            "--help" | "-h" | "--version" | "-V" | "--status" | "--releases" => i += 1,
             "-p" | "--parallel" => i += 2,
             _ if a.starts_with("--parallel=") => i += 1,
             _ => return Some(a),
@@ -167,9 +202,9 @@ fn print_line(s: &str) {
     let _ = out.write_all(b"\n");
 }
 
-fn run(parallel: usize) -> std::io::Result<()> {
+fn run(parallel: usize, track: engine::Track) -> std::io::Result<()> {
     let (tx, rx) = mpsc::channel();
-    let mut app = app::App::new(tx, parallel);
+    let mut app = app::App::new(tx, parallel, track);
     let mut terminal = ratatui::try_init()?;
     let result = event_loop(&mut terminal, &mut app, &rx);
     ratatui::restore();
@@ -243,6 +278,33 @@ mod tests {
     fn unknown_arg_still_finds_stragglers_and_skips_values() {
         assert_eq!(unknown_arg(&a(&["-p", "4"])), None);
         assert_eq!(unknown_arg(&a(&["--parallel=4", "--status"])), None);
+        assert_eq!(unknown_arg(&a(&["--releases", "--status"])), None);
         assert_eq!(unknown_arg(&a(&["--bogus"])), Some("--bogus"));
+    }
+
+    #[test]
+    fn releases_flag_beats_the_track_environment() {
+        assert_eq!(
+            track_from(&a(&["--releases"]), Some("commits".into())).unwrap(),
+            engine::Track::Releases
+        );
+        assert_eq!(
+            track_from(&a(&[]), Some("releases".into())).unwrap(),
+            engine::Track::Releases
+        );
+        assert_eq!(
+            track_from(&a(&[]), Some("commits".into())).unwrap(),
+            engine::Track::Commits
+        );
+        assert_eq!(track_from(&a(&[]), None).unwrap(), engine::Track::Commits);
+        assert_eq!(
+            track_from(&a(&[]), Some("".into())).unwrap(),
+            engine::Track::Commits
+        );
+    }
+
+    #[test]
+    fn track_env_rejects_junk() {
+        assert!(track_from(&a(&[]), Some("stable".into())).is_err());
     }
 }

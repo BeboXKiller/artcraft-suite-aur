@@ -18,6 +18,7 @@ pub const SUITE: &[&str] = &[
     "deckcraft",
     "designcraft",
     "effectcraft",
+    "figcraft",
     "filmcraft",
     "gridcraft",
     "lightcraft",
@@ -31,18 +32,19 @@ pub const SUITE: &[&str] = &[
 /// One-line product descriptions, as published on getartcraft.com/apps.
 pub fn description_of(repo: &str) -> &'static str {
     match repo {
-        "cadcraft" => "Fast, open-source computer-aided design and drafting, in pure Rust.",
+        "cadcraft" => "Fast, open-source computer-aided design and drafting in pure Rust.",
         "craft-launcher" => "The Craft App Launcher: installs every app and keeps them up to date.",
         "deckcraft" => "Build and deliver dynamic slide presentations, in pure Rust.",
         "designcraft" => "Open-source page layout and publishing, rebuilt in pure Rust.",
         "effectcraft" => "Open-source motion graphics and visual effects, built in pure Rust.",
+        "figcraft" => "Open-source interface design and prototyping, rebuilt in pure Rust.",
         "filmcraft" => "Professional, open-source video editing, rebuilt from scratch in Rust.",
         "gridcraft" => "Fast, open-source spreadsheets and data analysis, rebuilt in pure Rust.",
         "lightcraft" => "An open-source photo library and raw developer that runs on your machine.",
         "pdfcraft" => "The open-source PDF workbench: read, organize, combine, split and secure.",
         "photocraft" => "The open-source image editor you already know how to use.",
         "soundcraft" => "Professional audio recording, editing and mixing in pure Rust.",
-        "vectorcraft" => "Fast, open-source vector illustration, reimaged in pure Rust.",
+        "vectorcraft" => "Fast, open-source vector illustration, reimagined in pure Rust.",
         "wordcraft" => "Fast, open-source word processing, rebuilt in pure Rust.",
         _ => "A craft app from the ArtCraft suite.",
     }
@@ -74,6 +76,14 @@ impl Action {
     }
 }
 
+/// What "behind" is measured in: the branch's commits (the default), or the
+/// upstream's release tags — for people who only want stable releases.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Track {
+    Commits,
+    Releases,
+}
+
 #[derive(Clone, Debug)]
 pub struct AppInfo {
     pub repo: &'static str,
@@ -84,7 +94,8 @@ pub struct AppInfo {
     pub version: Option<String>,
     pub behind: Option<u64>,
     /// Upstream commits waiting to be pulled (`git log --oneline HEAD..@{u}`),
-    /// newest last — what the update actually contains.
+    /// newest last — what the update actually contains. In releases mode the
+    /// missing release tag names, newest first.
     pub commits: Vec<String>,
     /// A `.desktop` entry for this app exists in the user's (or system's)
     /// applications directory — registered by this tool, the launcher or an
@@ -723,10 +734,10 @@ fn info_of(repo: &'static str, dir: PathBuf, menu: Option<&MenuEntry>) -> AppInf
 
 /// Re-read one row after a fetch, a pull, a clone or a build: local facts and
 /// git state both, where git is as fresh as the last fetch in this repo.
-pub fn rescan_one(a: &mut AppInfo) {
+pub fn rescan_one(a: &mut AppInfo, track: Track) {
     // the clone's location was decided at scan time; everything else is re-read
     refresh_local(a, menu_map().get(a.repo));
-    refresh_git(a);
+    refresh_git(a, track);
 }
 
 /// Re-read one row's local facts without touching git — for when the fetch
@@ -751,13 +762,22 @@ fn refresh_local(a: &mut AppInfo, menu: Option<&MenuEntry>) {
     a.menu = menu.is_some();
 }
 
-fn refresh_git(a: &mut AppInfo) {
-    a.behind = a.cloned.then(|| behind(&a.dir)).flatten();
-    a.commits = if a.cloned {
-        upstream_commits(&a.dir)
-    } else {
-        Vec::new()
-    };
+fn refresh_git(a: &mut AppInfo, track: Track) {
+    match track {
+        Track::Commits => {
+            a.behind = a.cloned.then(|| behind(&a.dir)).flatten();
+            a.commits = if a.cloned {
+                upstream_commits(&a.dir)
+            } else {
+                Vec::new()
+            };
+        }
+        Track::Releases => {
+            let state = a.cloned.then(|| releases_state(&a.dir)).flatten();
+            a.behind = state.as_ref().map(|(n, _)| *n);
+            a.commits = state.map(|(_, tags)| tags).unwrap_or_default();
+        }
+    }
 }
 
 /// Whether the scan pipeline checks upstream on launch and `r`.
@@ -824,7 +844,9 @@ fn git_lock() -> std::sync::MutexGuard<'static, ()> {
 pub fn git_fetch_bounded(dir: &Path) -> Result<(), String> {
     let _guard = git_lock();
     let mut cmd = Command::new("git");
-    cmd.args(["-C", &dir.to_string_lossy(), "fetch"])
+    // --tags: a plain fetch can miss tags in a --depth 1 clone, and releases
+    // mode reads them.
+    cmd.args(["-C", &dir.to_string_lossy(), "fetch", "--tags"])
         .env("PATH", child_env_path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -869,19 +891,45 @@ fn run_capture(cmd: &str, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Commits `HEAD` is behind its upstream, from the *cached* remote-tracking
-/// ref — as fresh as the last fetch in this repo, never fresher. Callers are
-/// expected to have fetched first ([`git_fetch_bounded`], `f`, or `u`).
-fn behind(dir: &Path) -> Option<u64> {
+/// The ref to measure against: the branch's upstream (`@{u}`) when it
+/// resolves, else the remote's default branch (`origin/HEAD`) — the fallback
+/// a detached release checkout needs, since `@{u}` requires being on a branch.
+fn upstream_ref(dir: &Path) -> Option<String> {
+    if let Some(u) = run_capture(
+        "git",
+        &[
+            "-C",
+            &dir.to_string_lossy(),
+            "rev-parse",
+            "--abbrev-ref",
+            "@{u}",
+        ],
+    ) {
+        if !u.is_empty() {
+            return Some(u);
+        }
+    }
     run_capture(
         "git",
         &[
             "-C",
             &dir.to_string_lossy(),
-            "rev-list",
-            "--count",
-            "HEAD..@{u}",
+            "symbolic-ref",
+            "--short",
+            "refs/remotes/origin/HEAD",
         ],
+    )
+}
+
+/// Commits `HEAD` is behind its upstream, from the *cached* remote-tracking
+/// ref — as fresh as the last fetch in this repo, never fresher. Callers are
+/// expected to have fetched first ([`git_fetch_bounded`], `f`, or `u`).
+fn behind(dir: &Path) -> Option<u64> {
+    let up = upstream_ref(dir)?;
+    let range = format!("HEAD..{up}");
+    run_capture(
+        "git",
+        &["-C", &dir.to_string_lossy(), "rev-list", "--count", &range],
     )?
     .parse()
     .ok()
@@ -890,6 +938,10 @@ fn behind(dir: &Path) -> Option<u64> {
 /// Upstream commits the next pull would bring, from the same cached refs as
 /// [`behind`] — no network, so it is as fresh (or as stale) as the count.
 fn upstream_commits(dir: &Path) -> Vec<String> {
+    let Some(up) = upstream_ref(dir) else {
+        return Vec::new();
+    };
+    let range = format!("HEAD..{up}");
     let out = run_capture(
         "git",
         &[
@@ -898,7 +950,7 @@ fn upstream_commits(dir: &Path) -> Vec<String> {
             "log",
             "--oneline",
             "-8",
-            "HEAD..@{u}",
+            &range,
         ],
     );
     out.filter(|s| !s.is_empty())
@@ -906,7 +958,77 @@ fn upstream_commits(dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Release tags on the upstream that `HEAD` does not contain, newest first —
+/// the releases-mode twin of [`behind`]. Tags must have been fetched
+/// (`--tags` on every fetch path); `None` when there is no upstream to ask.
+fn releases_state(dir: &Path) -> Option<(u64, Vec<String>)> {
+    let up = upstream_ref(dir)?;
+    let tags = run_capture(
+        "git",
+        &[
+            "-C",
+            &dir.to_string_lossy(),
+            "tag",
+            "--merged",
+            &up,
+            "--sort=-v:refname",
+        ],
+    )?;
+    let have: std::collections::HashSet<String> = run_capture(
+        "git",
+        &["-C", &dir.to_string_lossy(), "tag", "--merged", "HEAD"],
+    )?
+    .lines()
+    .filter(|l| !l.is_empty())
+    .map(str::to_string)
+    .collect();
+    let missing: Vec<String> = tags
+        .lines()
+        .filter(|t| !t.is_empty() && !have.contains(*t))
+        .map(str::to_string)
+        .collect();
+    Some((missing.len() as u64, missing))
+}
+
+/// The newest release tag on the upstream, or `None` when there is no
+/// upstream or no tag yet.
+fn latest_release(dir: &Path) -> Option<String> {
+    let up = upstream_ref(dir)?;
+    let out = run_capture(
+        "git",
+        &[
+            "-C",
+            &dir.to_string_lossy(),
+            "tag",
+            "--merged",
+            &up,
+            "--sort=-v:refname",
+        ],
+    )?;
+    out.lines().find(|l| !l.is_empty()).map(str::to_string)
+}
+
+/// Whether `HEAD` already is `rev` (a tag or commit); `None` when either rev
+/// fails to resolve.
+fn head_is(dir: &Path, rev: &str) -> Option<bool> {
+    let head = run_capture("git", &["-C", &dir.to_string_lossy(), "rev-parse", "HEAD"])?;
+    let other = run_capture("git", &["-C", &dir.to_string_lossy(), "rev-parse", rev])?;
+    Some(head == other)
+}
+
 fn git_pull(repo: &str, dir: &Path) -> Result<(), String> {
+    // Detached (e.g. after a releases-mode checkout): return to the remote's
+    // default branch first, so switching back to commits mode lands on the
+    // branch instead of a cryptic pull failure.
+    if run_capture(
+        "git",
+        &["-C", &dir.to_string_lossy(), "symbolic-ref", "-q", "HEAD"],
+    )
+    .is_none()
+        && let Some(branch) = default_branch(dir)
+    {
+        git_switch(repo, dir, &branch)?;
+    }
     let _guard = git_lock();
     let mut cmd = Command::new("git");
     cmd.args(["-C", &dir.to_string_lossy(), "pull", "--ff-only"])
@@ -919,6 +1041,54 @@ fn git_pull(repo: &str, dir: &Path) -> Result<(), String> {
     s.success()
         .then_some(())
         .ok_or_else(|| "git pull failed (local changes?)".into())
+}
+
+/// The short name of the remote's default branch (`origin/main` → `main`).
+fn default_branch(dir: &Path) -> Option<String> {
+    let r = run_capture(
+        "git",
+        &[
+            "-C",
+            &dir.to_string_lossy(),
+            "symbolic-ref",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )?;
+    Some(r.strip_prefix("origin/")?.to_string())
+}
+
+fn git_switch(repo: &str, dir: &Path, branch: &str) -> Result<(), String> {
+    let _guard = git_lock();
+    let mut cmd = Command::new("git");
+    cmd.args(["-C", &dir.to_string_lossy(), "switch", branch])
+        .env("PATH", child_env_path());
+    attach_log(repo, &mut cmd, &format!("git switch {branch}"))?;
+    let s = run_registered(repo, &mut cmd)?;
+    if s.signal().is_some() {
+        return Err("cancelled".into());
+    }
+    s.success()
+        .then_some(())
+        .ok_or_else(|| format!("git switch {branch} failed"))
+}
+
+/// Move `HEAD` onto a release tag (detached). The branch pointer is untouched
+/// — nothing is lost and commits mode returns to the branch — and a dirty
+/// tree fails loudly, the same contract as an ff-only pull.
+fn git_checkout_release(repo: &str, dir: &Path, tag: &str) -> Result<(), String> {
+    let _guard = git_lock();
+    let mut cmd = Command::new("git");
+    cmd.args(["-C", &dir.to_string_lossy(), "checkout", tag])
+        .env("PATH", child_env_path());
+    attach_log(repo, &mut cmd, &format!("git checkout {tag}"))?;
+    let s = run_registered(repo, &mut cmd)?;
+    if s.signal().is_some() {
+        return Err("cancelled".into());
+    }
+    s.success()
+        .then_some(())
+        .ok_or_else(|| "git checkout failed (local changes?)".into())
 }
 
 fn git_org() -> String {
@@ -1238,16 +1408,54 @@ fn build_install(dir: &Path, repo: &str, tx: &Sender<Ev>) -> Result<String, Stri
     })
 }
 
+/// User-triggered fetch: logged to the repo's cache log and cancellable with
+/// `x`. Tags come along in both modes — releases mode reads them.
+fn git_fetch_logged(repo: &str, dir: &Path) -> Result<(), String> {
+    let _guard = git_lock();
+    let mut cmd = Command::new("git");
+    cmd.args(["-C", &dir.to_string_lossy(), "fetch", "--tags"])
+        .env("PATH", child_env_path());
+    attach_log(repo, &mut cmd, "git fetch --tags")?;
+    let s = run_registered(repo, &mut cmd)?;
+    if s.signal().is_some() {
+        return Err("cancelled".into());
+    }
+    s.success()
+        .then_some(())
+        .ok_or_else(|| "git fetch failed".into())
+}
+
+/// Fetch tags, then land `HEAD` on the newest release tag. Already there is
+/// the no-op; an older tag (or a clone that ran ahead on the branch) moves to
+/// the release — forward or back — without touching the branch pointer.
+fn update_to_release(repo: &str, dir: &Path) -> Result<(), String> {
+    git_fetch_logged(repo, dir)?;
+    let tag = latest_release(dir).ok_or_else(|| "no release tags found".to_string())?;
+    if head_is(dir, &tag) == Some(true) {
+        return Ok(());
+    }
+    git_checkout_release(repo, dir, &tag)
+}
+
 pub fn run_action(
     repo: &str,
     dir: &Path,
     action: Action,
+    track: Track,
     tx: &Sender<Ev>,
 ) -> Result<String, String> {
     match action {
         Action::Install => {
             if !dir.join("Cargo.toml").is_file() {
                 git_clone(repo, dir)?;
+                // A pristine, tool-owned clone may be moved onto the release
+                // safely; an existing clone's HEAD is never touched by `i`.
+                if track == Track::Releases
+                    && let Some(tag) = latest_release(dir)
+                    && head_is(dir, &tag) == Some(false)
+                {
+                    git_checkout_release(repo, dir, &tag)?;
+                }
             }
             build_install(dir, repo, tx)
         }
@@ -1256,7 +1464,10 @@ pub fn run_action(
                 return Err("not cloned - install it first".into());
             }
             let before = run_capture("git", &["-C", &dir.to_string_lossy(), "rev-parse", "HEAD"]);
-            git_pull(repo, dir)?;
+            match track {
+                Track::Commits => git_pull(repo, dir)?,
+                Track::Releases => update_to_release(repo, dir)?,
+            }
             let after = run_capture("git", &["-C", &dir.to_string_lossy(), "rev-parse", "HEAD"]);
             let pkg = pkg_of(repo, dir);
             let bin_ok = pkg.as_ref().is_some_and(|p| find_bin(p).is_some());
@@ -1269,30 +1480,24 @@ pub fn run_action(
             if !dir.join("Cargo.toml").is_file() {
                 return Err("not cloned".into());
             }
-            let _guard = git_lock();
-            let mut cmd = Command::new("git");
-            cmd.args(["-C", &dir.to_string_lossy(), "fetch"])
-                .env("PATH", child_env_path());
-            attach_log(repo, &mut cmd, "git fetch")?;
-            let s = run_registered(repo, &mut cmd)?;
-            if s.signal().is_some() {
-                return Err("cancelled".into());
-            }
-            if !s.success() {
-                return Err("git fetch failed".into());
-            }
-            let n = behind(dir);
-            Ok(match n {
-                Some(n) => format!("{repo}: behind {n} commit(s)"),
-                None => format!("{repo}: fetched (no upstream?)"),
+            git_fetch_logged(repo, dir)?;
+            Ok(match track {
+                Track::Commits => match behind(dir) {
+                    Some(n) => format!("{repo}: behind {n} commit(s)"),
+                    None => format!("{repo}: fetched (no upstream?)"),
+                },
+                Track::Releases => match releases_state(dir) {
+                    Some((n, _)) => format!("{repo}: behind {n} release(s)"),
+                    None => format!("{repo}: fetched (no upstream?)"),
+                },
             })
         }
     }
 }
 
-pub fn spawn(repo: String, dir: PathBuf, action: Action, tx: Sender<Ev>) {
+pub fn spawn(repo: String, dir: PathBuf, action: Action, track: Track, tx: Sender<Ev>) {
     std::thread::spawn(move || {
-        let result = run_action(&repo, &dir, action, &tx);
+        let result = run_action(&repo, &dir, action, track, &tx);
         // Desktop notification for the outcomes the user walked away from:
         // success, failure and the "up to date" no-op all count. Fetch is
         // quick and user-triggered, so it stays quiet.
@@ -1692,6 +1897,107 @@ mod tests {
     fn bounded_fetch_fails_loudly_when_there_is_nothing_to_fetch() {
         let root = tmp_tree("fetchfail");
         assert!(git_fetch_bounded(&root).is_err(), "not a git repo");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A commit with an inline identity — the release-tracking fixtures
+    /// commit several times and would drown in the repeated flags.
+    fn commit_in(dir: &Path, msg: &str) {
+        git_in(
+            dir,
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=test",
+                "commit",
+                "-m",
+                msg,
+            ],
+        );
+    }
+
+    /// Releases mode's core: "behind" counts the release tags `HEAD` does
+    /// not contain, newest first — even from a detached tag checkout, where
+    /// `@{u}` is unavailable and `origin/HEAD` must carry the answer.
+    #[test]
+    fn release_tracking_counts_the_tags_head_does_not_have() {
+        let root = tmp_tree("releases");
+        let origin = root.join("origin");
+        let clone = root.join("clone");
+        git_in(&root, &["init", "-b", "main", "origin"]);
+        std::fs::write(origin.join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("write");
+        git_in(&origin, &["add", "."]);
+        commit_in(&origin, "first");
+        git_in(&origin, &["tag", "v0.1.0"]);
+
+        // a second release lands on the origin
+        std::fs::write(origin.join("Cargo.toml"), "[package]\nname = \"y\"\n").expect("write");
+        git_in(&origin, &["add", "."]);
+        commit_in(&origin, "second");
+        git_in(&origin, &["tag", "v0.2.0"]);
+
+        git_in(&root, &["clone", "origin", "clone"]);
+        // the clone sits on the older release (detached, like `u` leaves it)
+        git_in(&clone, &["checkout", "v0.1.0"]);
+
+        let (n, tags) = releases_state(&clone).expect("releases state");
+        assert_eq!(n, 1, "one release beyond the checked-out tag");
+        assert_eq!(tags, vec!["v0.2.0".to_string()], "newest missing tag first");
+        assert_eq!(latest_release(&clone).as_deref(), Some("v0.2.0"));
+
+        // landing on the newest release closes the gap
+        git_in(&clone, &["checkout", "v0.2.0"]);
+        let (n, tags) = releases_state(&clone).expect("releases state");
+        assert_eq!((n, tags.len()), (0, 0), "on the latest release");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// Version sort, not lexicographic: v10 must beat v9, or the "newest"
+    /// release is silently the wrong one after the tenth minor.
+    #[test]
+    fn latest_release_sorts_by_version_not_letters() {
+        let root = tmp_tree("relver");
+        let origin = root.join("origin");
+        let clone = root.join("clone");
+        git_in(&root, &["init", "-b", "main", "origin"]);
+        std::fs::write(origin.join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("write");
+        git_in(&origin, &["add", "."]);
+        commit_in(&origin, "first");
+        git_in(&origin, &["tag", "v9.9.9"]);
+        git_in(&origin, &["tag", "v10.0.0"]);
+        git_in(&root, &["clone", "origin", "clone"]);
+        assert_eq!(latest_release(&clone).as_deref(), Some("v10.0.0"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    /// A clone without tags (`--no-tags`, as a stale shallow clone may be)
+    /// gains them from the bounded background fetch — every fetch path passes
+    /// `--tags` so releases mode always has its data.
+    #[test]
+    fn bounded_fetch_brings_tags_to_a_tagless_clone() {
+        let root = tmp_tree("fetchtags");
+        let origin = root.join("origin");
+        let clone = root.join("clone");
+        git_in(&root, &["init", "-b", "main", "origin"]);
+        std::fs::write(origin.join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("write");
+        git_in(&origin, &["add", "."]);
+        commit_in(&origin, "first");
+        git_in(&origin, &["tag", "v0.1.0"]);
+        git_in(&root, &["clone", "--no-tags", "origin", "clone"]);
+
+        let before =
+            run_capture("git", &["-C", &clone.to_string_lossy(), "tag"]).unwrap_or_default();
+        assert!(before.is_empty(), "fixture starts tagless: {before:?}");
+
+        git_fetch_bounded(&clone).expect("bounded fetch");
+
+        let after =
+            run_capture("git", &["-C", &clone.to_string_lossy(), "tag"]).unwrap_or_default();
+        assert!(
+            after.lines().any(|t| t == "v0.1.0"),
+            "fetch --tags brought the release: {after:?}"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 

@@ -209,8 +209,8 @@ checks = [
      and "[→] details" in stages["startup"] and "[←] close" in stages["startup"]),
     ("key bar row 2 not clipped", stages["startup"].splitlines()[-2].rstrip().endswith("quit")),
     ("key bar row 3", "[U] update all" in stages["startup"] and "[a] install all" in stages["startup"]
-     and "[d] uninstall" in stages["startup"]),
-    ("key bar row 3 not clipped", stages["startup"].splitlines()[-1].rstrip().endswith("rescan")),
+     and "[d] remove" in stages["startup"]),
+    ("key bar row 3 not clipped", stages["startup"].splitlines()[-1].rstrip().endswith("releases")),
     ("selection moved", "▶ " in stages["nav"] and stages["nav"].count("▶") == 1),
     ("Down arrow moves selection", marked_line(stages["arrow_down"]) != ""
      and marked_line(stages["arrow_down"]) != marked_line(stages["nav"])),

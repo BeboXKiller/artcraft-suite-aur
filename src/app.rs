@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::engine::{self, Action, AppInfo, Ev};
+use crate::engine::{self, Action, AppInfo, Ev, Track};
 use crate::theme::Palette;
 
 /// How many apps may compile at once unless the user says otherwise
@@ -68,6 +68,8 @@ pub struct App {
     pub failed: HashMap<String, String>,
     /// `o`: show only apps that need attention
     pub filter_attention: bool,
+    /// commits (default) or releases — what "behind" counts; `t` toggles
+    pub track: Track,
     /// apps whose description row is open (toggled with → / ←)
     pub expanded: HashSet<usize>,
     pub msg: String,
@@ -98,7 +100,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(tx: Sender<Ev>, max_parallel: usize) -> Self {
+    pub fn new(tx: Sender<Ev>, max_parallel: usize, track: Track) -> Self {
         let max_parallel = max_parallel.clamp(MIN_JOBS, MAX_JOBS);
         let mut app = Self {
             apps: Vec::new(),
@@ -109,6 +111,7 @@ impl App {
             pending: VecDeque::new(),
             failed: HashMap::new(),
             filter_attention: false,
+            track,
             expanded: HashSet::new(),
             msg: "scanning…".into(),
             quit: false,
@@ -129,7 +132,8 @@ impl App {
         // the UI opens immediately; rows arrive with Ev::Loaded and the git
         // state settles in with Ev::Checked (see scan_pipeline)
         let tx = app.tx.clone();
-        std::thread::spawn(move || scan_pipeline(tx));
+        let track = app.track;
+        std::thread::spawn(move || scan_pipeline(tx, track));
         app.refresh_log();
         app
     }
@@ -274,7 +278,7 @@ impl App {
             return;
         };
         self.busy.insert(repo.clone(), action.label().into());
-        engine::spawn(repo, dir, action, self.tx.clone());
+        engine::spawn(repo, dir, action, self.track, self.tx.clone());
     }
 
     fn pump(&mut self) {
@@ -295,8 +299,9 @@ impl App {
         };
         let mut info = cur.clone();
         let tx = self.tx.clone();
+        let track = self.track;
         std::thread::spawn(move || {
-            engine::rescan_one(&mut info);
+            engine::rescan_one(&mut info, track);
             let _ = tx.send(Ev::Scanned { index, info });
         });
     }
@@ -305,7 +310,8 @@ impl App {
     /// discovery of the clone locations and the upstream check included (`r`).
     fn rescan_all(&self) {
         let tx = self.tx.clone();
-        std::thread::spawn(move || scan_pipeline(tx));
+        let track = self.track;
+        std::thread::spawn(move || scan_pipeline(tx, track));
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
@@ -455,8 +461,25 @@ impl App {
                     }
                 };
             }
+            Char('t') => {
+                self.toggle_track();
+                self.rescan_all();
+            }
             _ => {}
         }
+    }
+
+    /// Flip between commits and releases and say so. The caller re-checks
+    /// every row (the counts mean different things under each track).
+    fn toggle_track(&mut self) {
+        self.track = match self.track {
+            Track::Commits => Track::Releases,
+            Track::Releases => Track::Commits,
+        };
+        self.msg = match self.track {
+            Track::Releases => "tracking releases — re-checking…".into(),
+            Track::Commits => "tracking commits — re-checking…".into(),
+        };
     }
 
     /// Rows the list currently shows: all of them, or just the ones needing attention.
@@ -821,7 +844,7 @@ impl App {
 /// A failed fetch (offline, timeout) leaves that row honestly "not checked"
 /// instead of trusting the stale refs. Always ends with [`Ev::Checked`], even
 /// when the check is disabled or there is nothing to fetch.
-fn scan_pipeline(tx: Sender<Ev>) {
+fn scan_pipeline(tx: Sender<Ev>, track: Track) {
     let apps = engine::scan();
     let seeds: Vec<(usize, AppInfo)> = apps
         .iter()
@@ -833,7 +856,7 @@ fn scan_pipeline(tx: Sender<Ev>) {
     if engine::fetch_enabled() {
         for (index, mut info) in seeds {
             if engine::git_fetch_bounded(&info.dir).is_ok() {
-                engine::rescan_one(&mut info);
+                engine::rescan_one(&mut info, track);
             } else {
                 engine::rescan_local(&mut info);
             }
@@ -860,6 +883,7 @@ impl App {
             pending: VecDeque::new(),
             failed: HashMap::new(),
             filter_attention: false,
+            track: Track::Commits,
             expanded: HashSet::new(),
             msg: "ready".into(),
             quit: false,
@@ -1274,6 +1298,22 @@ mod tests {
         assert!(app.needs_attention(&app.apps[0]));
         app.on_key(key(KeyCode::Char('o')));
         assert_eq!(app.visible_rows(), vec![0]);
+    }
+
+    /// `t` flips the mode and announces it; the real key also re-checks every
+    /// row (a background rescan, so the toggle itself is tested directly).
+    #[test]
+    fn toggling_the_track_switches_modes_and_says_so() {
+        let mut app = App::with_apps(apps(2));
+        assert_eq!(app.track, Track::Commits);
+
+        app.toggle_track();
+        assert_eq!(app.track, Track::Releases);
+        assert!(app.msg.contains("tracking releases"), "msg: {}", app.msg);
+
+        app.toggle_track();
+        assert_eq!(app.track, Track::Commits);
+        assert!(app.msg.contains("tracking commits"), "msg: {}", app.msg);
     }
 
     #[test]

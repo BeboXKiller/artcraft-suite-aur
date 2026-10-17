@@ -5,8 +5,8 @@ build, install and launch each app without leaving the keyboard.
 
 ## Features
 
-- **The whole suite, from source** — 13 apps (PhotoCraft, WordCraft, FilmCraft,
-  Craft Launcher, …): clone from GitHub, build with cargo, install to
+- **The whole suite, from source** — 14 apps (PhotoCraft, FigCraft, WordCraft,
+  FilmCraft, Craft Launcher, …): clone from GitHub, build with cargo, install to
   `~/.local/bin`, launch — all from one keyboard-driven list.
 - **Auto-detection on launch** — the first frame appears immediately (the scan
   runs in the background) and the suite finds itself: clones are located up to
@@ -26,6 +26,12 @@ build, install and launch each app without leaving the keyboard.
 - **Batch actions over picks** — `Space` / `Ctrl+Space` pick any set of rows;
   `u` / `i` / `f` / `x` / `Enter` act on the picks (or the highlighted row when
   nothing is picked); `U` / `a` update / install everything.
+- **Release tracking** — `--releases` / `ARTCRAFT_TRACK=releases` (or `t`
+  live in the UI) measures "behind" in release tags instead of every commit,
+  and `u` lands on the newest release tag (detached checkout — nothing is
+  lost, a dirty tree fails loudly, and commits mode returns to the branch).
+  For suites that ship tons of commits between releases, and people who want
+  the stable releases only.
 - **Controlled parallelism** — `-p N` / `--parallel N` / `ARTCRAFT_PARALLEL`
   cap how many apps compile at once (default 2, queue the rest as `◌`); `p`
   opens a popup to change it live; the header shows `⚙ n/limit` while builds
@@ -99,6 +105,7 @@ cargo install --path .
 ```sh
 artcraft-suite-aur             # interactive UI (requires a terminal)
 artcraft-suite-aur -p 1        # one build at a time (low-spec machines)
+artcraft-suite-aur --releases  # track release tags, not every commit
 artcraft-suite-aur --status    # one line per app: repo|state|pkg|version|dir
 artcraft-suite-aur --version
 artcraft-suite-aur --help
@@ -173,6 +180,7 @@ it removes the binary, the desktop entry, the icons *and* the clone in
 | `d` | uninstall the picked/highlighted apps — binary, desktop entry, icons and the clone; asks for `y`, any other key cancels |
 | `p` | popup to set how many builds run at once (1–16; low-spec machines should stick to 1–2) |
 | `o` | toggle **attention only** — hide the apps that are up to date |
+| `t` | toggle **release tracking** — rows count release tags instead of commits, and `u` lands on the newest release; every clone re-checks |
 | `x` / `Delete` | cancel the running task, or dequeue a queued one — again over the picked set |
 | `r` | rescan from disk (background): clone locations, menu entries, and the upstream check |
 | `?` | toggle the help overlay |
@@ -222,6 +230,7 @@ reverse video still carry every state. Each state is also a glyph and a phrase
 | `ARTCRAFT_GIT_ORG` | GitHub org the suite is cloned from | `storytold` |
 | `ARTCRAFT_REPO_ROOTS` | extra directories searched for suite clones (colon-separated; `$HOME` is always searched) | — |
 | `ARTCRAFT_PARALLEL` | how many apps compile at once (1–16; same as `-p`; low-spec: 1–2) | `2` |
+| `ARTCRAFT_TRACK` | `releases` = track release tags instead of commits (same as `--releases`, or `t` in the UI); `commits` = every commit on the branch | `commits` |
 | `ARTCRAFT_FETCH` | `never` (or `0`/`no`/`off`) = skip the automatic upstream check on launch and `r`; `f` / `u` still fetch | check on |
 | `ARTCRAFT_NOTIFY` | `never` (or `0`/`no`/`off`) = suppress the desktop notification raised when an install or update finishes (needs `notify-send`) | notify on |
 | `XDG_CACHE_HOME` | where build logs live | `~/.cache` |

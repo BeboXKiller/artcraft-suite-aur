@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, Tone};
-use crate::engine::{self, AppInfo};
+use crate::engine::{self, AppInfo, Track};
 use crate::theme::{Sty, Tint};
 
 /// Smallest grid this layout is designed for; below it we show a polite message.
@@ -121,6 +121,9 @@ fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
     }
     if app.filter_attention {
         spans.push(Span::styled(" attention ", s.fg(Tint::Accent).bold()));
+    }
+    if app.track == Track::Releases {
+        spans.push(Span::styled(" ⚑ releases ", s.fg(Tint::Accent)));
     }
     if !app.busy.is_empty() {
         spans.push(Span::styled(
@@ -242,7 +245,7 @@ fn row_state(app: &App, a: &AppInfo) -> (String, String, Tint) {
         match a.behind {
             Some(n) if n > 0 => (
                 behind_glyph(n),
-                format!("{n} {} behind", commit_word(n)),
+                format!("{n} {} behind", behind_word(app.track, n)),
                 Tint::Warn,
             ),
             Some(_) => ("✓".into(), "up to date".into(), Tint::Good),
@@ -267,6 +270,20 @@ fn behind_glyph(n: u64) -> String {
 
 fn commit_word(n: u64) -> &'static str {
     if n == 1 { "commit" } else { "commits" }
+}
+
+/// "commit(s)" or "release(s)" — what `behind` counts under the current track.
+fn behind_word(track: Track, n: u64) -> &'static str {
+    match track {
+        Track::Commits => commit_word(n),
+        Track::Releases => {
+            if n == 1 {
+                "release"
+            } else {
+                "releases"
+            }
+        }
+    }
 }
 
 /// The bottom pane: the live log while a task runs, the update's contents
@@ -324,12 +341,15 @@ fn details_for<'a>(app: &App, a: &AppInfo, s: Sty, width: usize) -> (String, Vec
             let title = format!(" What's new in {repo} ");
             let version = a.version.as_deref().unwrap_or("no version");
             let mut lines = vec![Line::from(Span::styled(
-                format!(" {version} · {n} {} to pull", commit_word(n)),
+                format!(" {version} · {n} {} to pull", behind_word(app.track, n)),
                 s.fg(Tint::Warn).bold(),
             ))];
             if a.commits.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    " (commit list unknown — f refreshes)",
+                    match app.track {
+                        Track::Commits => " (commit list unknown — f refreshes)",
+                        Track::Releases => " (release list unknown — f refreshes)",
+                    },
                     s.fg(Tint::Faint),
                 )));
             }
@@ -526,11 +546,13 @@ fn key_bar(s: Sty) -> Vec<Line<'static>> {
             Span::styled("[a]", c),
             Span::raw(" install all  "),
             Span::styled("[d]", c),
-            Span::raw(" uninstall  "),
+            Span::raw(" remove  "),
             Span::styled("[p]", c),
-            Span::raw(" builds  "),
+            Span::raw(" jobs  "),
             Span::styled("[r]", c),
-            Span::raw(" rescan"),
+            Span::raw(" rescan  "),
+            Span::styled("[t]", c),
+            Span::raw(" releases"),
         ]),
     ]
 }
@@ -548,6 +570,7 @@ fn draw_help(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
         Line::from("  → / l            open a description under the app"),
         Line::from("  ← / h            close it again"),
         Line::from("  o               attention only (hide apps that are fine)"),
+        Line::from("  t               track releases — rows and u follow tags"),
         Line::from(""),
         Line::from(Span::styled(
             "Picking — what u / i / f / d / x / Enter act on",
@@ -829,15 +852,15 @@ mod tests {
             "install hint missing: {row3:?}"
         );
         assert!(
-            row3.contains("[d] uninstall"),
+            row3.contains("[d] remove"),
             "uninstall hint missing: {row3:?}"
         );
         assert!(
-            row3.contains("[p] builds"),
+            row3.contains("[p] jobs"),
             "parallel-builds hint missing: {row3:?}"
         );
         assert!(
-            row3.trim_end().ends_with("rescan"),
+            row3.trim_end().ends_with("releases"),
             "row 3 was clipped at 80 columns: {row3:?}"
         );
     }
@@ -912,6 +935,75 @@ mod tests {
             row.contains("3 commits behind"),
             "no behind phrase: {row:?}"
         );
+    }
+
+    #[test]
+    fn releases_mode_counts_releases_in_words() {
+        let mut a = app();
+        a.track = Track::Releases;
+        a.apps.push(app_info("wordcraft", true, true, Some(2)));
+        let rows = render(&a, 80, 24);
+        let row = rows
+            .iter()
+            .find(|r| r.contains("wordcraft"))
+            .expect("row present");
+        assert!(row.contains("↑2"), "no behind glyph: {row:?}");
+        assert!(
+            row.contains("2 releases behind"),
+            "no releases phrase: {row:?}"
+        );
+
+        let mut b = app();
+        b.track = Track::Releases;
+        b.apps.push(app_info("gridcraft", true, true, Some(1)));
+        let rows = render(&b, 80, 24);
+        let row = rows
+            .iter()
+            .find(|r| r.contains("gridcraft"))
+            .expect("row present");
+        assert!(
+            row.contains("1 release behind"),
+            "singular releases phrase missing: {row:?}"
+        );
+    }
+
+    #[test]
+    fn commits_mode_keeps_saying_commits() {
+        // regression: the same row under the default track must not flip
+        let mut a = app();
+        a.track = Track::Commits;
+        a.apps.push(app_info("wordcraft", true, true, Some(2)));
+        let row = render(&a, 80, 24)
+            .iter()
+            .find(|r| r.contains("wordcraft"))
+            .expect("row present")
+            .clone();
+        assert!(row.contains("2 commits behind"), "{row:?}");
+        assert!(!row.contains("release"), "{row:?}");
+    }
+
+    #[test]
+    fn releases_badge_shows_in_the_header_only_in_releases_mode() {
+        let mut a = app();
+        a.apps.push(app_info("wordcraft", true, true, Some(0)));
+        let head = render(&a, 80, 24)[0].clone();
+        assert!(!head.contains("releases"), "no badge expected: {head:?}");
+        a.track = Track::Releases;
+        let head = render(&a, 80, 24)[0].clone();
+        assert!(head.contains("⚑ releases"), "badge missing: {head:?}");
+    }
+
+    #[test]
+    fn details_pane_lists_release_tags() {
+        let mut a = app();
+        a.track = Track::Releases;
+        let mut b = app_info("wordcraft", true, true, Some(2));
+        b.commits = vec!["v0.14.0".into(), "v0.15.0".into()];
+        a.apps.push(b);
+        a.sel = 1;
+        let joined = render(&a, 80, 24).join("\n");
+        assert!(joined.contains("2 releases to pull"), "{joined:?}");
+        assert!(joined.contains("v0.15.0"), "{joined:?}");
     }
 
     #[test]
