@@ -14,9 +14,11 @@ use crate::theme::Palette;
 
 pub mod help;
 pub mod jobs;
+pub mod list;
 pub mod uninstall;
 pub use help::HelpOverlayComponent;
 pub use jobs::JobsPopupComponent;
+pub use list::ListComponent;
 pub use uninstall::UninstallConfirmComponent;
 
 /// Shared read-only context handed to every render. Kept minimal on purpose:

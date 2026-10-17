@@ -1,6 +1,6 @@
 //! Application state: selection, background tasks, key handling.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 #[cfg(test)]
 use std::sync::mpsc;
 use std::sync::mpsc::{Receiver, Sender};
@@ -8,7 +8,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::components::{
-    Component, ComponentEvent, HelpOverlayComponent, JobsPopupComponent, UninstallConfirmComponent,
+    Component, ComponentEvent, HelpOverlayComponent, JobsPopupComponent, ListComponent,
+    UninstallConfirmComponent,
 };
 use crate::engine::{self, Action, AppInfo, Ev, Track};
 use crate::theme::Palette;
@@ -59,23 +60,16 @@ fn compact_progress(p: &engine::Progress) -> Option<String> {
 }
 
 pub struct App {
-    pub apps: Vec<AppInfo>,
-    /// highlighted row — the fallback target when nothing is picked
-    pub sel: usize,
-    /// explicitly picked rows (`Space` / `Ctrl+Space`); empty means "use `sel`"
-    pub picks: HashSet<usize>,
+    /// suite rows, highlight, picks and the attention filter
+    pub list: ListComponent,
     pub busy: HashMap<String, String>,
     /// repo → live build progress, while a build reports it
     pub progress: HashMap<String, engine::Progress>,
     pub pending: VecDeque<(String, Action)>,
     /// repo → error of the last failed task, until a retry clears it
     pub failed: HashMap<String, String>,
-    /// `o`: show only apps that need attention
-    pub filter_attention: bool,
     /// commits (default) or releases — what "behind" counts; `t` toggles
     pub track: Track,
-    /// apps whose description row is open (toggled with → / ←)
-    pub expanded: HashSet<usize>,
     pub msg: String,
     pub quit: bool,
     /// `?` overlay: open flag + scroll offset
@@ -103,16 +97,12 @@ impl App {
     pub fn new(tx: Sender<Ev>, max_parallel: usize, track: Track) -> Self {
         let max_parallel = max_parallel.clamp(MIN_JOBS, MAX_JOBS);
         let mut app = Self {
-            apps: Vec::new(),
-            sel: 0,
-            picks: HashSet::new(),
+            list: ListComponent::default(),
             busy: HashMap::new(),
             progress: HashMap::new(),
             pending: VecDeque::new(),
             failed: HashMap::new(),
-            filter_attention: false,
             track,
-            expanded: HashSet::new(),
             msg: "scanning…".into(),
             quit: false,
             help: HelpOverlayComponent::default(),
@@ -157,7 +147,7 @@ impl App {
                         }
                     };
                     self.msg = text;
-                    if let Some(idx) = self.apps.iter().position(|a| a.repo == repo) {
+                    if let Some(idx) = self.list.apps.iter().position(|a| a.repo == repo) {
                         self.rescan_at(idx);
                     }
                     self.pump();
@@ -167,18 +157,18 @@ impl App {
                 }
                 Ev::Scanned { index, info } => {
                     // the suite order is fixed, but guard against a stale index anyway
-                    if let Some(slot) = self.apps.get_mut(index)
+                    if let Some(slot) = self.list.apps.get_mut(index)
                         && slot.repo == info.repo
                     {
                         *slot = info;
                     }
                 }
                 Ev::Loaded(apps) => {
-                    self.apps = apps;
+                    self.list.apps = apps;
                     self.clamp_selection();
                     // rows are local-only now; the status line admits how long
                     // until Checked delivers real git state
-                    let clones = self.apps.iter().filter(|a| a.cloned).count();
+                    let clones = self.list.apps.iter().filter(|a| a.cloned).count();
                     if clones > 0 && engine::fetch_enabled() {
                         let word = if clones == 1 { "repo" } else { "repos" };
                         self.msg = format!("checking {clones} {word} for updates…");
@@ -203,7 +193,7 @@ impl App {
     /// Called once per loop: a `stat` per tick, re-read only when the file or the
     /// selection changed, so rendering stays a pure function of state.
     pub fn refresh_log(&mut self) {
-        let repo = self.apps.get(self.sel).map_or("", |a| a.repo);
+        let repo = self.list.apps.get(self.list.sel).map_or("", |a| a.repo);
         let len = std::fs::metadata(engine::log_file(repo))
             .map(|m| m.len())
             .unwrap_or(0);
@@ -220,7 +210,7 @@ impl App {
     /// What the status row says, and how loud it should look.
     /// The highlighted row's live build progress, if it's building.
     pub fn selected_progress(&self) -> Option<&engine::Progress> {
-        let repo = self.apps.get(self.sel)?.repo;
+        let repo = self.list.apps.get(self.list.sel)?.repo;
         self.progress.get(repo)
     }
 
@@ -268,6 +258,7 @@ impl App {
     /// Spawn `action` against `repo`'s discovered clone location.
     fn start_now(&mut self, repo: String, action: Action) {
         let Some(dir) = self
+            .list
             .apps
             .iter()
             .find(|a| a.repo == repo)
@@ -292,7 +283,7 @@ impl App {
 
     /// Re-read one entry from disk on a worker thread.
     fn rescan_at(&self, index: usize) {
-        let Some(cur) = self.apps.get(index) else {
+        let Some(cur) = self.list.apps.get(index) else {
             return;
         };
         let mut info = cur.clone();
@@ -364,16 +355,16 @@ impl App {
             PageUp => self.move_sel(-(PAGE as isize)),
             PageDown => self.move_sel(PAGE as isize),
             Home | Char('g') => {
-                self.sel = self.visible_rows().first().copied().unwrap_or(0);
+                self.list.sel = self.visible_rows().first().copied().unwrap_or(0);
             }
             End | Char('G') => {
-                self.sel = self.visible_rows().last().copied().unwrap_or(0);
+                self.list.sel = self.visible_rows().last().copied().unwrap_or(0);
             }
             Right | Char('l') => {
-                self.expanded.insert(self.sel);
+                self.list.expanded.insert(self.list.sel);
             }
             Left | Char('h') => {
-                self.expanded.remove(&self.sel);
+                self.list.expanded.remove(&self.list.sel);
             }
             Enter => self.enter(),
             Char(' ') => self.pick_one(),
@@ -392,6 +383,7 @@ impl App {
             }
             Char('U') => {
                 let repos: Vec<String> = self
+                    .list
                     .apps
                     .iter()
                     .filter(|a| a.cloned)
@@ -409,6 +401,7 @@ impl App {
             }
             Char('a') => {
                 let repos: Vec<String> = self
+                    .list
                     .apps
                     .iter()
                     .filter(|a| !a.installed)
@@ -429,9 +422,9 @@ impl App {
                 self.msg = "refreshing…".into();
             }
             Char('o') => {
-                self.filter_attention = !self.filter_attention;
+                self.list.filter_attention = !self.list.filter_attention;
                 self.clamp_selection();
-                self.msg = if !self.filter_attention {
+                self.msg = if !self.list.filter_attention {
                     "filter cleared".into()
                 } else {
                     let shown = self.visible_rows().len();
@@ -463,55 +456,19 @@ impl App {
         };
     }
 
-    /// Rows the list currently shows: all of them, or just the ones needing attention.
+    /// Rows the list currently shows — see [`ListComponent::visible_rows`].
     pub fn visible_rows(&self) -> Vec<usize> {
-        if !self.filter_attention {
-            return (0..self.apps.len()).collect();
-        }
-        self.apps
-            .iter()
-            .enumerate()
-            .filter(|(_, a)| self.needs_attention(a))
-            .map(|(i, _)| i)
-            .collect()
-    }
-
-    /// Missing, behind upstream, unchecked, stale install, or failed — the
-    /// rows `o` keeps.
-    pub fn needs_attention(&self, a: &AppInfo) -> bool {
-        !a.installed
-            || self.failed.contains_key(a.repo)
-            || a.behind.is_some_and(|n| n > 0)
-            || a.stale
-            || (a.cloned && a.behind.is_none())
+        self.list.visible_rows(&self.failed)
     }
 
     /// Step the highlight by `step` rows *within what is visible*.
     fn move_sel(&mut self, step: isize) {
-        let vis = self.visible_rows();
-        if vis.is_empty() {
-            return;
-        }
-        let pos = vis.iter().position(|&i| i == self.sel).unwrap_or(0) as isize;
-        let next = (pos + step).clamp(0, vis.len() as isize - 1) as usize;
-        self.sel = vis[next];
+        self.list.move_sel(step, &self.failed);
     }
 
     /// Keep the highlight on a row the list is actually showing.
     fn clamp_selection(&mut self) {
-        let vis = self.visible_rows();
-        if vis.is_empty() {
-            self.filter_attention = false;
-            self.sel = self.sel.min(self.apps.len().saturating_sub(1));
-            return;
-        }
-        if !vis.contains(&self.sel) {
-            self.sel = vis
-                .iter()
-                .copied()
-                .find(|&i| i >= self.sel)
-                .unwrap_or_else(|| *vis.last().unwrap());
-        }
+        self.list.clamp_selection(&self.failed);
     }
 
     fn request_quit(&mut self) {
@@ -528,43 +485,34 @@ impl App {
 
     /// `Space`: pick just this row; pressing it again on the only pick clears it.
     fn pick_one(&mut self) {
-        if self.picks.len() == 1 && self.picks.contains(&self.sel) {
-            self.picks.clear();
+        if self.list.picks.len() == 1 && self.list.picks.contains(&self.list.sel) {
+            self.list.picks.clear();
             self.msg = "picks cleared".into();
         } else {
-            self.picks.clear();
-            self.picks.insert(self.sel);
-            self.msg = format!("picked {}", self.row_label(self.sel));
+            self.list.picks.clear();
+            self.list.picks.insert(self.list.sel);
+            self.msg = format!("picked {}", self.row_label(self.list.sel));
         }
     }
 
     /// `Ctrl+Space`: add or remove this row from the picked set.
     fn pick_toggle(&mut self) {
-        let label = self.row_label(self.sel);
-        if self.picks.remove(&self.sel) {
-            self.msg = format!("unpicked {label} ({} left)", self.picks.len());
+        let label = self.row_label(self.list.sel);
+        if self.list.picks.remove(&self.list.sel) {
+            self.msg = format!("unpicked {label} ({} left)", self.list.picks.len());
         } else {
-            self.picks.insert(self.sel);
-            self.msg = format!("picked {label} ({} total)", self.picks.len());
+            self.list.picks.insert(self.list.sel);
+            self.msg = format!("picked {label} ({} total)", self.list.picks.len());
         }
     }
 
     fn row_label(&self, idx: usize) -> String {
-        self.apps
-            .get(idx)
-            .map(|a| a.repo.to_string())
-            .unwrap_or_else(|| "?".into())
+        self.list.row_label(idx)
     }
 
     /// Rows an operation applies to: the picked set, else the highlighted row.
     fn targets(&self) -> Vec<usize> {
-        if self.picks.is_empty() {
-            vec![self.sel]
-        } else {
-            let mut v: Vec<usize> = self.picks.iter().copied().collect();
-            v.sort_unstable();
-            v
-        }
+        self.list.targets()
     }
 
     fn is_staged(&self, repo: &str) -> bool {
@@ -572,7 +520,7 @@ impl App {
     }
 
     fn cancel_selected(&mut self) {
-        if self.apps.is_empty() {
+        if self.list.apps.is_empty() {
             return;
         }
         let targets = self.targets();
@@ -581,7 +529,7 @@ impl App {
         let mut finished = 0usize;
         let mut idle = 0usize;
         for i in &targets {
-            let Some(repo) = self.apps.get(*i).map(|a| a.repo) else {
+            let Some(repo) = self.list.apps.get(*i).map(|a| a.repo) else {
                 continue;
             };
             if self.busy.contains_key(repo) {
@@ -636,7 +584,7 @@ impl App {
     /// `d`: offer to uninstall the picked (or highlighted) rows — binary,
     /// desktop entry, icons and the clone. `y` confirms; any other key cancels.
     fn uninstall_selected(&mut self) {
-        if self.apps.is_empty() {
+        if self.list.apps.is_empty() {
             return;
         }
         let targets = self.targets();
@@ -644,7 +592,8 @@ impl App {
             .iter()
             .copied()
             .filter(|i| {
-                self.apps
+                self.list
+                    .apps
                     .get(*i)
                     .is_some_and(|a| a.installed && !self.is_staged(a.repo))
             })
@@ -670,7 +619,7 @@ impl App {
         let mut last_msg = String::new();
         let mut last_err = None;
         for i in targets {
-            let Some(a) = self.apps.get(i) else {
+            let Some(a) = self.list.apps.get(i) else {
                 continue;
             };
             let repo = a.repo.to_string();
@@ -717,7 +666,7 @@ impl App {
     }
 
     fn enter(&mut self) {
-        if self.apps.is_empty() {
+        if self.list.apps.is_empty() {
             return;
         }
         let targets = self.targets();
@@ -725,7 +674,7 @@ impl App {
             self.enter_many(&targets);
             return;
         }
-        let Some(a) = self.apps.get(targets[0]) else {
+        let Some(a) = self.list.apps.get(targets[0]) else {
             return;
         };
         let repo = a.repo;
@@ -756,8 +705,11 @@ impl App {
         let before = self.busy.len() + self.pending.len();
         let mut installed = 0usize;
         for i in targets {
-            let Some((is_installed, repo)) =
-                self.apps.get(*i).map(|a| (a.installed, a.repo.to_string()))
+            let Some((is_installed, repo)) = self
+                .list
+                .apps
+                .get(*i)
+                .map(|a| (a.installed, a.repo.to_string()))
             else {
                 continue;
             };
@@ -782,7 +734,7 @@ impl App {
     /// Run `action` against the picked set, or the highlighted row when nothing
     /// is picked. Busy/queued rows are left alone by `try_start`.
     fn start_action(&mut self, action: Action) {
-        if self.apps.is_empty() {
+        if self.list.apps.is_empty() {
             self.msg = "no apps".into();
             return;
         }
@@ -793,7 +745,7 @@ impl App {
             .then(|| self.row_label(targets[0]))
             .is_some_and(|repo| self.busy.contains_key(&repo));
         for i in &targets {
-            let Some(repo) = self.apps.get(*i).map(|a| a.repo.to_string()) else {
+            let Some(repo) = self.list.apps.get(*i).map(|a| a.repo.to_string()) else {
                 continue;
             };
             self.try_start(repo, action);
@@ -857,16 +809,15 @@ impl App {
     pub fn with_apps(apps: Vec<AppInfo>) -> Self {
         let (tx, _rx) = mpsc::channel();
         Self {
-            apps,
-            sel: 0,
-            picks: HashSet::new(),
+            list: ListComponent {
+                apps,
+                ..ListComponent::default()
+            },
             busy: HashMap::new(),
             progress: HashMap::new(),
             pending: VecDeque::new(),
             failed: HashMap::new(),
-            filter_attention: false,
             track: Track::Commits,
-            expanded: HashSet::new(),
             msg: "ready".into(),
             quit: false,
             help: HelpOverlayComponent::default(),
@@ -936,15 +887,15 @@ mod tests {
     fn selection_is_clamped() {
         let mut app = App::with_apps(apps(3));
         app.on_key(key(KeyCode::Up));
-        assert_eq!(app.sel, 0);
+        assert_eq!(app.list.sel, 0);
         app.on_key(key(KeyCode::End));
-        assert_eq!(app.sel, 2);
+        assert_eq!(app.list.sel, 2);
         app.on_key(key(KeyCode::Down));
-        assert_eq!(app.sel, 2);
+        assert_eq!(app.list.sel, 2);
         app.on_key(key(KeyCode::Home));
-        assert_eq!(app.sel, 0);
+        assert_eq!(app.list.sel, 0);
         app.on_key(key(KeyCode::PageDown));
-        assert_eq!(app.sel, 2, "PAGE jump clamps to the last row");
+        assert_eq!(app.list.sel, 2, "PAGE jump clamps to the last row");
     }
 
     #[test]
@@ -962,31 +913,34 @@ mod tests {
         let mut app = App::with_apps(apps(3));
         app.on_key(key(KeyCode::Right));
         assert!(
-            app.expanded.contains(&0),
+            app.list.expanded.contains(&0),
             "Right expands the highlighted app"
         );
         app.on_key(key(KeyCode::Down));
         app.on_key(key(KeyCode::Char('l')));
-        assert!(app.expanded.contains(&1), "l expands too");
+        assert!(app.list.expanded.contains(&1), "l expands too");
         assert!(
-            app.expanded.contains(&0),
+            app.list.expanded.contains(&0),
             "expansions stay per app while moving"
         );
         app.on_key(key(KeyCode::Char('h')));
         assert!(
-            !app.expanded.contains(&1),
+            !app.list.expanded.contains(&1),
             "h collapses the highlighted row"
         );
-        assert!(app.expanded.contains(&0), "other expansions are untouched");
+        assert!(
+            app.list.expanded.contains(&0),
+            "other expansions are untouched"
+        );
         app.on_key(key(KeyCode::Left));
         assert!(
-            app.expanded.contains(&0),
+            app.list.expanded.contains(&0),
             "Left only collapses the highlighted app"
         );
         app.on_key(key(KeyCode::Home));
         app.on_key(key(KeyCode::Left));
         assert!(
-            app.expanded.is_empty(),
+            app.list.expanded.is_empty(),
             "Left collapses the app under the cursor"
         );
     }
@@ -1027,31 +981,31 @@ mod tests {
     fn space_picks_one_row_and_ctrl_space_toggles() {
         let mut app = App::with_apps(apps(3));
         app.on_key(key(KeyCode::Char(' ')));
-        assert_eq!(app.picks, [0usize].into_iter().collect());
+        assert_eq!(app.list.picks, [0usize].into_iter().collect());
         assert!(app.msg.contains("picked a"));
 
         app.on_key(key(KeyCode::Down));
         app.on_key(ctrl(KeyCode::Char(' ')));
-        assert_eq!(app.picks, [0usize, 1].into_iter().collect());
+        assert_eq!(app.list.picks, [0usize, 1].into_iter().collect());
 
         app.on_key(key(KeyCode::Down));
         app.on_key(ctrl(KeyCode::Char(' ')));
-        assert_eq!(app.picks, [0usize, 1, 2].into_iter().collect());
+        assert_eq!(app.list.picks, [0usize, 1, 2].into_iter().collect());
         app.on_key(ctrl(KeyCode::Char(' ')));
-        assert_eq!(app.picks, [0usize, 1].into_iter().collect());
+        assert_eq!(app.list.picks, [0usize, 1].into_iter().collect());
 
         // Space on a fresh row replaces the whole set, then clears it
         app.on_key(key(KeyCode::Char(' ')));
-        assert_eq!(app.picks, [2usize].into_iter().collect());
+        assert_eq!(app.list.picks, [2usize].into_iter().collect());
         app.on_key(key(KeyCode::Char(' ')));
-        assert!(app.picks.is_empty());
+        assert!(app.list.picks.is_empty());
     }
 
     #[test]
     fn actions_run_on_the_picked_rows_not_the_cursor() {
         let mut app = App::with_apps(apps(3));
         saturate(&mut app);
-        app.picks = [1, 2].into_iter().collect();
+        app.list.picks = [1, 2].into_iter().collect();
         app.on_key(key(KeyCode::Char('u')));
         assert_eq!(
             app.pending
@@ -1068,8 +1022,8 @@ mod tests {
     fn a_single_picks_wins_over_the_highlighted_row() {
         let mut app = App::with_apps(apps(3));
         saturate(&mut app);
-        app.sel = 0;
-        app.picks = [2].into_iter().collect();
+        app.list.sel = 0;
+        app.list.picks = [2].into_iter().collect();
         app.on_key(key(KeyCode::Char('i')));
         assert_eq!(
             app.pending
@@ -1087,7 +1041,7 @@ mod tests {
         app.pending.push_back(("a".into(), Action::Install));
         app.pending.push_back(("b".into(), Action::Install));
         app.pending.push_back(("c".into(), Action::Install));
-        app.picks = [1, 2].into_iter().collect();
+        app.list.picks = [1, 2].into_iter().collect();
         app.on_key(key(KeyCode::Char('x')));
         assert_eq!(
             app.pending
@@ -1106,7 +1060,7 @@ mod tests {
         v[1].installed = true;
         let mut app = App::with_apps(v);
         saturate(&mut app);
-        app.picks = [0, 1].into_iter().collect();
+        app.list.picks = [0, 1].into_iter().collect();
         app.on_key(key(KeyCode::Enter));
         assert_eq!(
             app.pending
@@ -1127,24 +1081,27 @@ mod tests {
             one("c", false, false, None),
         ]);
         app.on_key(key(KeyCode::Char('o')));
-        assert!(app.filter_attention);
+        assert!(app.list.filter_attention);
         assert_eq!(app.visible_rows(), vec![1, 2]);
-        assert_eq!(app.sel, 1, "highlight must move onto a visible row");
+        assert_eq!(app.list.sel, 1, "highlight must move onto a visible row");
         app.on_key(key(KeyCode::Char('j')));
-        assert_eq!(app.sel, 2);
+        assert_eq!(app.list.sel, 2);
         app.on_key(key(KeyCode::Char('j')));
-        assert_eq!(app.sel, 2, "the highlight stops at the last visible row");
+        assert_eq!(
+            app.list.sel, 2,
+            "the highlight stops at the last visible row"
+        );
         app.on_key(key(KeyCode::Char('o')));
-        assert!(!app.filter_attention);
+        assert!(!app.list.filter_attention);
         assert_eq!(app.visible_rows(), vec![0, 1, 2]);
     }
 
     #[test]
     fn failed_tasks_count_as_needing_attention() {
         let mut app = App::with_apps(vec![one("a", true, true, Some(0))]);
-        assert!(!app.needs_attention(&app.apps[0]));
+        assert!(!app.list.needs_attention(&app.list.apps[0], &app.failed));
         app.failed.insert("a".into(), "cargo build failed".into());
-        assert!(app.needs_attention(&app.apps[0]));
+        assert!(app.list.needs_attention(&app.list.apps[0], &app.failed));
         app.on_key(key(KeyCode::Char('o')));
         assert_eq!(app.visible_rows(), vec![0]);
     }
@@ -1182,13 +1139,20 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let mut app = App::with_apps(apps(3));
         app.on_key(key(KeyCode::End));
-        assert_eq!(app.sel, 2);
+        assert_eq!(app.list.sel, 2);
 
         // the background scan finishing: fewer rows than before the highlight
         tx.send(Ev::Loaded(apps(1))).expect("send");
         app.drain(&rx);
-        assert_eq!(app.apps.len(), 1, "the delivered rows replace the old ones");
-        assert_eq!(app.sel, 0, "the highlight is clamped onto the new rows");
+        assert_eq!(
+            app.list.apps.len(),
+            1,
+            "the delivered rows replace the old ones"
+        );
+        assert_eq!(
+            app.list.sel, 0,
+            "the highlight is clamped onto the new rows"
+        );
         // rows alone don't finish a rescan — the upstream check does
         tx.send(Ev::Checked).expect("send");
         app.drain(&rx);

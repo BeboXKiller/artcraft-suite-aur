@@ -149,7 +149,7 @@ mod tests {
         let mut v = apps(3);
         v[0].installed = true;
         let mut app = App::with_apps(v);
-        app.sel = 0;
+        app.list.sel = 0;
         app.on_key(key(KeyCode::Char('d')));
         assert!(app.uninstall.pending(), "d must ask first");
         assert!(app.msg.contains('y'), "prompt must say y: {}", app.msg);
@@ -175,7 +175,7 @@ mod tests {
         v[0].installed = true;
         let mut app = App::with_apps(v);
         app.busy.insert("a".into(), "updating".into());
-        app.sel = 0;
+        app.list.sel = 0;
         app.on_key(key(KeyCode::Char('d')));
         assert!(!app.uninstall.pending(), "nothing eligible must not ask");
         assert_eq!(app.msg, "nothing to uninstall (1 skipped)");

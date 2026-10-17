@@ -75,16 +75,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.help.open {
         crate::components::help::render_help_card(frame, area, s, app.help.scroll);
     }
-    app.uninstall.render(frame, area, s, &app.apps);
+    app.uninstall.render(frame, area, s, &app.list.apps);
     app.jobs.render(frame, area, s);
 }
 
 /// Right-aligned header counters: how much is current, behind, or missing.
 fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
-    if app.apps.is_empty() {
+    if app.list.apps.is_empty() {
         return Vec::new();
     }
     let behind = app
+        .list
         .apps
         .iter()
         .filter(|a| a.behind.is_some_and(|n| n > 0))
@@ -92,17 +93,20 @@ fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
     // nothing present at all: no clone *and* no installed binary — an app
     // that is installed without its source is not "missing"
     let missing = app
+        .list
         .apps
         .iter()
         .filter(|a| !a.cloned && !a.installed)
         .count();
     let up = app
+        .list
         .apps
         .iter()
         .filter(|a| a.installed && !a.stale && (a.behind == Some(0) || !a.cloned))
         .count();
     // clones whose upstream check hasn't landed — unknown, not "current"
     let unchecked = app
+        .list
         .apps
         .iter()
         .filter(|a| a.cloned && a.behind.is_none())
@@ -115,7 +119,7 @@ fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
     if unchecked > 0 {
         spans.push(Span::styled(format!(" ? {unchecked} "), s.fg(Tint::Muted)));
     }
-    if app.filter_attention {
+    if app.list.filter_attention {
         spans.push(Span::styled(" attention ", s.fg(Tint::Accent).bold()));
     }
     if app.track == Track::Releases {
@@ -152,12 +156,12 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
     let mut items: Vec<ListItem> = Vec::with_capacity(vis.len() * 2);
     let mut sel_pos = None;
     for &idx in &vis {
-        let a = &app.apps[idx];
+        let a = &app.list.apps[idx];
         let (glyph, phrase, tint) = row_state(app, a);
-        let selected = idx == app.sel;
+        let selected = idx == app.list.sel;
         let bar = s.on_bar();
         let cell = |t: Tint| if selected { bar } else { s.fg(t) };
-        let (mark, mark_style) = if app.picks.contains(&idx) {
+        let (mark, mark_style) = if app.list.picks.contains(&idx) {
             (
                 "■",
                 if selected {
@@ -188,7 +192,7 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
             sel_pos = Some(items.len());
         }
         items.push(ListItem::new(Line::from(spans)));
-        if app.expanded.contains(&idx) {
+        if app.list.expanded.contains(&idx) {
             items.push(ListItem::new(Line::from(Span::styled(
                 format!(
                     "        {}",
@@ -203,10 +207,10 @@ fn draw_list(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
     }
 
     let mut title = format!(" Apps ({})", vis.len());
-    if !app.picks.is_empty() {
-        title.push_str(&format!(" · {} picked", app.picks.len()));
+    if !app.list.picks.is_empty() {
+        title.push_str(&format!(" · {} picked", app.list.picks.len()));
     }
-    if app.filter_attention {
+    if app.list.filter_attention {
         title.push_str(" · attention only");
     }
     title.push(' ');
@@ -290,7 +294,7 @@ fn behind_word(track: Track, n: u64) -> &'static str {
 /// otherwise — what the next `u` would actually bring.
 fn draw_details(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
     let width = area.width.saturating_sub(4) as usize;
-    let Some(a) = app.apps.get(app.sel) else {
+    let Some(a) = app.list.apps.get(app.list.sel) else {
         frame.render_widget(
             Paragraph::new(" nothing to show — no apps scanned ")
                 .block(Block::bordered().title(" Details ")),
@@ -675,8 +679,8 @@ mod tests {
     #[test]
     fn header_summarises_the_suite() {
         let mut a = app();
-        a.apps.push(app_info("wordcraft", true, true, Some(3)));
-        a.apps.push(app_info("cadcraft", false, false, None));
+        a.list.apps.push(app_info("wordcraft", true, true, Some(3)));
+        a.list.apps.push(app_info("cadcraft", false, false, None));
         let rows = render(&a, 80, 24);
         let head = rows[0].clone();
         assert!(head.contains("✓ 1"), "up-to-date count missing: {head:?}");
@@ -749,7 +753,7 @@ mod tests {
     #[test]
     fn unchecked_rows_admit_it_and_the_header_counts_them() {
         let mut a = app(); // photocraft: checked, up to date
-        a.apps.push(app_info("wordcraft", true, true, None));
+        a.list.apps.push(app_info("wordcraft", true, true, None));
         let rows = render(&a, 80, 24);
         let row = rows
             .iter()
@@ -769,7 +773,7 @@ mod tests {
         assert!(head.contains("? 1"), "unchecked count missing: {head:?}");
 
         // the details pane admits it too, and points at the way to fix it
-        a.sel = 1;
+        a.list.sel = 1;
         let joined = render(&a, 80, 24).join("\n");
         assert!(joined.contains("wordcraft — not checked"), "{joined:?}");
         assert!(joined.contains("upstream not checked"), "{joined:?}");
@@ -779,9 +783,9 @@ mod tests {
     #[test]
     fn the_attention_filter_keeps_unchecked_clones() {
         let mut a = app(); // photocraft: checked, up to date
-        a.apps.push(app_info("wordcraft", true, true, None));
+        a.list.apps.push(app_info("wordcraft", true, true, None));
         assert!(
-            a.needs_attention(&a.apps[1]),
+            a.list.needs_attention(&a.list.apps[1], &Default::default()),
             "an unchecked clone still needs checking"
         );
         a.on_key(crossterm::event::KeyEvent::new(
@@ -797,9 +801,9 @@ mod tests {
     #[test]
     fn a_stale_install_says_update_ready_not_up_to_date() {
         let mut a = app(); // photocraft: behind 0, built from the same HEAD
-        a.apps.push(app_info("wordcraft", true, true, Some(0)));
-        a.apps[1].stale = true;
-        a.apps[1].version = Some("0.11.0".into());
+        a.list.apps.push(app_info("wordcraft", true, true, Some(0)));
+        a.list.apps[1].stale = true;
+        a.list.apps[1].version = Some("0.11.0".into());
         let rows = render(&a, 80, 24);
         let row = rows
             .iter()
@@ -817,7 +821,7 @@ mod tests {
             "only the fresh photocraft counts up: {head:?}"
         );
         // the details pane explains it and points at the fix
-        a.sel = 1;
+        a.list.sel = 1;
         let joined = render(&a, 80, 24).join("\n");
         assert!(joined.contains("wordcraft — update ready"), "{joined:?}");
         assert!(
@@ -836,7 +840,7 @@ mod tests {
     #[test]
     fn behind_rows_say_so_in_words() {
         let mut a = app();
-        a.apps.push(app_info("wordcraft", true, true, Some(3)));
+        a.list.apps.push(app_info("wordcraft", true, true, Some(3)));
         let rows = render(&a, 80, 24);
         let row = rows
             .iter()
@@ -853,7 +857,7 @@ mod tests {
     fn releases_mode_counts_releases_in_words() {
         let mut a = app();
         a.track = Track::Releases;
-        a.apps.push(app_info("wordcraft", true, true, Some(2)));
+        a.list.apps.push(app_info("wordcraft", true, true, Some(2)));
         let rows = render(&a, 80, 24);
         let row = rows
             .iter()
@@ -867,7 +871,7 @@ mod tests {
 
         let mut b = app();
         b.track = Track::Releases;
-        b.apps.push(app_info("gridcraft", true, true, Some(1)));
+        b.list.apps.push(app_info("gridcraft", true, true, Some(1)));
         let rows = render(&b, 80, 24);
         let row = rows
             .iter()
@@ -884,7 +888,7 @@ mod tests {
         // regression: the same row under the default track must not flip
         let mut a = app();
         a.track = Track::Commits;
-        a.apps.push(app_info("wordcraft", true, true, Some(2)));
+        a.list.apps.push(app_info("wordcraft", true, true, Some(2)));
         let row = render(&a, 80, 24)
             .iter()
             .find(|r| r.contains("wordcraft"))
@@ -897,7 +901,7 @@ mod tests {
     #[test]
     fn releases_badge_shows_in_the_header_only_in_releases_mode() {
         let mut a = app();
-        a.apps.push(app_info("wordcraft", true, true, Some(0)));
+        a.list.apps.push(app_info("wordcraft", true, true, Some(0)));
         let head = render(&a, 80, 24)[0].clone();
         assert!(!head.contains("releases"), "no badge expected: {head:?}");
         a.track = Track::Releases;
@@ -911,8 +915,8 @@ mod tests {
         a.track = Track::Releases;
         let mut b = app_info("wordcraft", true, true, Some(2));
         b.commits = vec!["v0.14.0".into(), "v0.15.0".into()];
-        a.apps.push(b);
-        a.sel = 1;
+        a.list.apps.push(b);
+        a.list.sel = 1;
         let joined = render(&a, 80, 24).join("\n");
         assert!(joined.contains("2 releases to pull"), "{joined:?}");
         assert!(joined.contains("v0.15.0"), "{joined:?}");
@@ -924,7 +928,9 @@ mod tests {
         // "↑99+" (4 chars). Both used to overflow their columns and clip the
         // tail, so the phrase lost its "behind" and the glyph read "↑9…".
         let mut a = app();
-        a.apps.push(app_info("wordcraft", true, true, Some(1234)));
+        a.list
+            .apps
+            .push(app_info("wordcraft", true, true, Some(1234)));
         let row = render(&a, 80, 24)
             .iter()
             .find(|r| r.contains("wordcraft"))
@@ -949,8 +955,8 @@ mod tests {
             "abc1234 fix table borders".into(),
             "def5678 faster previews".into(),
         ];
-        a.apps.push(b);
-        a.sel = 1;
+        a.list.apps.push(b);
+        a.list.sel = 1;
         let rows = render(&a, 80, 24);
         let joined = rows.join("\n");
         assert!(joined.contains("What's new in wordcraft"), "{joined:?}");
@@ -1094,16 +1100,16 @@ mod tests {
     #[test]
     fn attention_filter_shows_only_what_needs_it() {
         let mut a = app(); // photocraft: up to date
-        a.apps.push(app_info("wordcraft", true, true, Some(2)));
-        a.apps.push(app_info("cadcraft", false, false, None));
-        a.sel = 0;
+        a.list.apps.push(app_info("wordcraft", true, true, Some(2)));
+        a.list.apps.push(app_info("cadcraft", false, false, None));
+        a.list.sel = 0;
         a.on_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('o'),
             crossterm::event::KeyModifiers::NONE,
         ));
-        assert!(a.filter_attention);
+        assert!(a.list.filter_attention);
         assert_eq!(a.visible_rows(), vec![1, 2], "up-to-date row must hide");
-        assert_eq!(a.sel, 1, "the highlight must land on a visible row");
+        assert_eq!(a.list.sel, 1, "the highlight must land on a visible row");
         let rows = render(&a, 80, 24);
         assert!(
             rows.iter().any(|r| r.contains("attention only")),
@@ -1118,7 +1124,7 @@ mod tests {
     #[test]
     fn expanded_row_shows_an_indented_description() {
         let mut a = app();
-        a.expanded.insert(0);
+        a.list.expanded.insert(0);
         let rows = render(&a, 80, 24);
         let desc = rows
             .iter()
@@ -1145,8 +1151,8 @@ mod tests {
     #[test]
     fn picked_rows_show_a_filled_square_and_the_title_counts_them() {
         let mut a = app();
-        a.apps.push(app_info("videocraft", false, false, None));
-        a.picks.insert(1);
+        a.list.apps.push(app_info("videocraft", false, false, None));
+        a.list.picks.insert(1);
         let rows = render(&a, 80, 24);
         assert!(
             rows.iter().any(|r| r.contains("· 1 picked")),

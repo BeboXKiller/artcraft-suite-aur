@@ -197,24 +197,27 @@ mod tests {
         app.on_key(key(KeyCode::Char('?')));
         assert!(app.help.open);
         app.on_key(key(KeyCode::Down));
-        assert_eq!(app.sel, 0, "navigation must not pass through the overlay");
+        assert_eq!(
+            app.list.sel, 0,
+            "navigation must not pass through the overlay"
+        );
         app.on_key(key(KeyCode::Esc));
         assert!(!app.help.open);
         app.on_key(key(KeyCode::Down));
-        assert_eq!(app.sel, 1);
+        assert_eq!(app.list.sel, 1);
     }
 
     #[test]
     fn help_scrolls_with_j_and_k_without_moving_selection() {
         let mut app = App::with_apps(apps(3));
-        app.sel = 2;
+        app.list.sel = 2;
         app.on_key(key(KeyCode::Char('?')));
         assert_eq!(app.help.scroll, 0, "opening starts at the top");
         app.on_key(key(KeyCode::Char('j')));
         app.on_key(key(KeyCode::Down));
         assert_eq!(app.help.scroll, 2);
         assert_eq!(
-            app.sel, 2,
+            app.list.sel, 2,
             "the app selection must not move under the overlay"
         );
         app.on_key(key(KeyCode::Char('k')));

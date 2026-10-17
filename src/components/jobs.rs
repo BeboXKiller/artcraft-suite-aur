@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(app.jobs.scratch, MIN_JOBS);
         app.on_key(key(KeyCode::Char('j')));
         assert_eq!(
-            app.sel, 0,
+            app.list.sel, 0,
             "other keys must not act while the popup is open"
         );
         app.on_key(key(KeyCode::Esc));
