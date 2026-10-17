@@ -36,19 +36,12 @@ impl HeaderComponent {
             Tone::Bad => Tint::Bad,
             Tone::Info => Tint::Muted,
         };
-        let head_text = vec![
-            Line::from(vec![
-                Span::styled(" ArtCraft Suite", s.fg(Tint::Accent).bold()),
-                Span::styled(
-                    " — install · update · launch the Craft suite",
-                    s.fg(Tint::Muted),
-                ),
-            ]),
-            Line::from(vec![
-                Span::raw(" "),
-                Span::styled(view.status.to_string(), s.fg(tone_tint)),
-            ]),
-        ];
+        // One status line inside the border — the suite name already lives in
+        // the border title, so the old second line duplicated it.
+        let head_text = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(view.status.to_string(), s.fg(tone_tint)),
+        ]);
         let mut head_block = Block::bordered().title(" ArtCraft Suite ");
         let summary = summary(
             view.apps,

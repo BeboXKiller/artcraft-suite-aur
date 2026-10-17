@@ -87,13 +87,14 @@ Any key that is not `q`/`Esc` clears `confirm_quit`.
 ### 2.1 Frame layout
 
 - Minimum size 60×15; below that a polite "too small" message replaces the UI.
-- Vertical layout: header 4 rows / list `Min(6)` / details 7 rows / key bar 3
+- Vertical layout: header 3 rows / list `Min(6)` / details 7 rows / key bar 3
   rows.
 - Overlay paint order: help < uninstall-confirm < jobs-popup (later = on top).
 
 ### 2.2 Header
 
-- Title block " ArtCraft Suite ", subtitle line, right-aligned summary counters.
+- Border title " ArtCraft Suite ", one status line inside, right-aligned
+  summary counters on the top border (no duplicate inner title line).
 - Summary counters: `✓ up`, `↑ behind`, `· missing`; `? unchecked` only when >
   0; `attention` badge while the filter is on; `⚑ releases` badge on the
   releases track; `⚙ n/max` only while builds run.

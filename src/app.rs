@@ -198,7 +198,7 @@ impl App {
         }
 
         let [head, main, tail, keys_row] = Layout::vertical([
-            Constraint::Length(4),
+            Constraint::Length(3),
             Constraint::Min(6),
             Constraint::Length(7),
             Constraint::Length(3),
@@ -1365,12 +1365,13 @@ mod tests {
 
     #[test]
     fn status_line_is_visible() {
-        // regression: the header used to be 3 rows with 2 text lines, so this row
-        // was clipped and every status/error message vanished
+        // regression: the header once ran 2 text lines through a 3-row block,
+        // so this row was clipped and every status/error message vanished —
+        // the block is 3 rows with exactly one text line now
         for (w, h) in [(120, 40), (80, 24), (60, 15)] {
             let rows = render(&app(), w, h);
             assert!(
-                rows.iter().take(4).any(|r| r.contains("ready")),
+                rows.iter().take(3).any(|r| r.contains("ready")),
                 "status row missing at {w}x{h}: {rows:?}"
             );
         }
