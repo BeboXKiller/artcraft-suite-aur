@@ -7,6 +7,7 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::components::{Component, HelpOverlayComponent};
 use crate::engine::{self, Action, AppInfo, Ev, Track};
 use crate::theme::Palette;
 
@@ -75,10 +76,8 @@ pub struct App {
     pub expanded: HashSet<usize>,
     pub msg: String,
     pub quit: bool,
-    /// `?` overlay
-    pub show_help: bool,
-    /// scroll offset inside the help overlay (it is longer than a small screen)
-    pub help_scroll: usize,
+    /// `?` overlay: open flag + scroll offset
+    pub help: HelpOverlayComponent,
     /// brand palette for this terminal (see [`crate::theme`])
     pub palette: Palette,
     /// second `q` required while tasks are running
@@ -116,8 +115,7 @@ impl App {
             expanded: HashSet::new(),
             msg: "scanning…".into(),
             quit: false,
-            show_help: false,
-            help_scroll: 0,
+            help: HelpOverlayComponent::default(),
             palette: Palette::detect(),
             confirm_quit: false,
             confirm_uninstall: None,
@@ -330,23 +328,12 @@ impl App {
             return;
         }
         if key.code == Char('?') {
-            self.show_help = !self.show_help;
-            if self.show_help {
-                self.help_scroll = 0;
-            }
+            self.help.toggle();
             self.confirm_quit = false;
             return;
         }
-        if self.show_help {
-            match key.code {
-                Esc | Char('q') | Enter => self.show_help = false,
-                Up | Char('k') => self.help_scroll = self.help_scroll.saturating_sub(1),
-                Down | Char('j') => self.help_scroll = self.help_scroll.saturating_add(1),
-                PageUp => self.help_scroll = self.help_scroll.saturating_sub(PAGE),
-                PageDown => self.help_scroll = self.help_scroll.saturating_add(PAGE),
-                Home | Char('g') => self.help_scroll = 0,
-                _ => {}
-            }
+        if self.help.open {
+            self.help.handle_key(key);
             return;
         }
         // The parallel-builds popup: adjust the scratch value, apply or cancel.
@@ -890,8 +877,7 @@ impl App {
             expanded: HashSet::new(),
             msg: "ready".into(),
             quit: false,
-            show_help: false,
-            help_scroll: 0,
+            help: HelpOverlayComponent::default(),
             palette: Palette::of(crate::theme::Depth::TrueColor),
             confirm_quit: false,
             confirm_uninstall: None,
@@ -975,41 +961,6 @@ mod tests {
         assert!(app.pending.is_empty() && app.busy.is_empty());
         app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(app.quit, "Ctrl+C must quit");
-    }
-
-    #[test]
-    fn help_overlay_swallows_keys_until_closed() {
-        let mut app = App::with_apps(apps(3));
-        app.on_key(key(KeyCode::Char('?')));
-        assert!(app.show_help);
-        app.on_key(key(KeyCode::Down));
-        assert_eq!(app.sel, 0, "navigation must not pass through the overlay");
-        app.on_key(key(KeyCode::Esc));
-        assert!(!app.show_help);
-        app.on_key(key(KeyCode::Down));
-        assert_eq!(app.sel, 1);
-    }
-
-    #[test]
-    fn help_scrolls_with_j_and_k_without_moving_selection() {
-        let mut app = App::with_apps(apps(3));
-        app.sel = 2;
-        app.on_key(key(KeyCode::Char('?')));
-        assert_eq!(app.help_scroll, 0, "opening starts at the top");
-        app.on_key(key(KeyCode::Char('j')));
-        app.on_key(key(KeyCode::Down));
-        assert_eq!(app.help_scroll, 2);
-        assert_eq!(
-            app.sel, 2,
-            "the app selection must not move under the overlay"
-        );
-        app.on_key(key(KeyCode::Char('k')));
-        assert_eq!(app.help_scroll, 1);
-        app.on_key(key(KeyCode::Home));
-        assert_eq!(app.help_scroll, 0);
-        app.on_key(key(KeyCode::Esc));
-        app.on_key(key(KeyCode::Char('?')));
-        assert_eq!(app.help_scroll, 0, "reopening starts at the top again");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! artcraft-suite-aur: TUI to install, update and launch the Craft App Suite from source.
 
 mod app;
+mod components;
 mod engine;
 mod theme;
 mod ui;

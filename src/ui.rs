@@ -72,8 +72,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
         keys_row,
     );
 
-    if app.show_help {
-        draw_help(frame, area, s, app.help_scroll);
+    if app.help.open {
+        crate::components::help::render_help_card(frame, area, s, app.help.scroll);
     }
     if let Some(targets) = &app.confirm_uninstall {
         draw_confirm_uninstall(frame, area, s, app, targets);
@@ -578,74 +578,6 @@ fn key_bar(s: Sty) -> Vec<Line<'static>> {
             Span::raw(" releases"),
         ]),
     ]
-}
-
-fn draw_help(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
-    let h = s.fg(Tint::Accent).bold();
-    // Every hint with a one-line description of what it actually does. Kept
-    // within 58 columns so nothing wraps on the 60x15 minimum; longer than a
-    // small screen, so j/k scroll it.
-    let lines: Vec<Line> = vec![
-        Line::from(Span::styled("Navigation", h)),
-        Line::from("  j/k or ↑↓       move the highlight"),
-        Line::from("  PgUp / PgDn     jump ten rows"),
-        Line::from("  g / G, Home/End first / last app"),
-        Line::from("  → / l            open a description under the app"),
-        Line::from("  ← / h            close it again"),
-        Line::from("  o               attention only (hide apps that are fine)"),
-        Line::from("  t               track releases — rows and u follow tags"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Picking — what u / i / f / d / x / Enter act on",
-            h,
-        )),
-        Line::from("  Space           pick the row; press again to unpick"),
-        Line::from("  Ctrl+Space      add or remove a row, keep the rest"),
-        Line::from("  (no picks)      actions apply to the highlighted row"),
-        Line::from(""),
-        Line::from(Span::styled("Acting on the picks", h)),
-        Line::from("  Enter           open the app; install it if missing"),
-        Line::from("                   many picks: install every missing one"),
-        Line::from("  u / i / f       update / install / fetch the picks"),
-        Line::from("  U / a           update everything / install everything"),
-        Line::from("  d               uninstall: binary, menu, icons, clone"),
-        Line::from("                   y confirms, any other key cancels"),
-        Line::from("  x or Delete     cancel a task, or unqueue a queued one"),
-        Line::from("  r               rescan: clone locations, menu, git state"),
-        Line::from(""),
-        Line::from(Span::styled("Session", h)),
-        Line::from("  ?               open or close this help"),
-        Line::from("  p               how many builds run at once (1-16)"),
-        Line::from("  q / Esc         quit — asks again while tasks run"),
-        Line::from("  Ctrl+C          quit immediately"),
-        Line::from(""),
-        Line::from(Span::styled("Reading a row", h)),
-        Line::from("  ✓ up to date    ↑n behind   ◐ updating…   ◌ queued"),
-        Line::from("  ✗ build failed  ○ cloned, not built   · missing"),
-        Line::from("  ? not checked   ↻ update ready (source newer)"),
-        Line::from("                   f fetches · u updates"),
-        Line::from("                   colour tier auto · NO_COLOR=1 = mono"),
-    ];
-    // full-width modal so nothing bleeds around it; capped to the screen so it
-    // also fits the 60x15 minimum
-    let w = area.width;
-    let box_h = (lines.len() as u16 + 2).min(area.height);
-    let rect = Rect::new(
-        area.x,
-        area.y + (area.height.saturating_sub(box_h)) / 2,
-        w,
-        box_h,
-    );
-    let inner_h = box_h.saturating_sub(2) as usize;
-    let offset = scroll.min(lines.len().saturating_sub(inner_h));
-    let visible: Vec<Line> = lines.into_iter().skip(offset).collect();
-    frame.render_widget(Clear, rect);
-    frame.render_widget(
-        Paragraph::new(visible)
-            .block(Block::bordered().title(" Help — j/k scroll · ? or Esc to close "))
-            .wrap(Wrap { trim: false }),
-        rect,
-    );
 }
 
 /// Centered confirmation for `d`: deleting the clone deserves more than a
@@ -1371,41 +1303,6 @@ mod tests {
     }
 
     #[test]
-    fn help_overlay_renders_on_top() {
-        let mut a = app();
-        a.show_help = true;
-        let joined = render(&a, 100, 30).join("\n");
-        assert!(joined.contains("Esc to close"));
-        assert!(joined.contains("Navigation"));
-        assert!(joined.contains("attention only"));
-        assert!(
-            joined.contains("pick the row; press again to unpick"),
-            "every hint needs a description: {joined:?}"
-        );
-        assert!(
-            joined.contains("uninstall: binary, menu, icons, clone"),
-            "uninstall hint missing from help: {joined:?}"
-        );
-        assert!(
-            joined.contains("how many builds run at once"),
-            "parallel-builds hint missing from help: {joined:?}"
-        );
-    }
-
-    #[test]
-    fn help_scrolls_to_later_sections() {
-        let mut a = app();
-        a.show_help = true;
-        a.help_scroll = 20;
-        let joined = render(&a, 80, 24).join("\n");
-        assert!(joined.contains("Reading a row"), "{joined:?}");
-        assert!(
-            !joined.contains("Navigation"),
-            "scroll offset ignored: {joined:?}"
-        );
-    }
-
-    #[test]
     fn jobs_popup_shows_the_value_and_the_low_spec_warning() {
         let mut a = app();
         a.jobs_popup = true;
@@ -1472,27 +1369,6 @@ mod tests {
         assert_eq!(pad("abc", 6), "abc   ");
         assert_eq!(pad("abcdef", 4), "abc…");
         assert_eq!(pad("abc", 3), "abc");
-    }
-
-    #[test]
-    fn help_fits_the_minimum_terminal() {
-        let mut a = app();
-        a.show_help = true;
-        // first screen: nothing wraps at 60 columns (every line fits 58)
-        let top = render(&a, 60, 15).join("\n");
-        assert!(top.contains("Navigation"), "{top:?}");
-        assert!(
-            top.contains("attention only (hide apps that are fine)"),
-            "{top:?}"
-        );
-        // scrolled to the end: the legend is reachable too, and the offset clamps
-        a.help_scroll = 99;
-        let bottom = render(&a, 60, 15).join("\n");
-        assert!(bottom.contains("NO_COLOR=1"), "{bottom:?}");
-        assert!(
-            !bottom.contains("Navigation"),
-            "scroll clamp not applied: {bottom:?}"
-        );
     }
 
     #[test]
