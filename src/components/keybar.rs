@@ -1,4 +1,9 @@
 //! The three-line keyboard legend under the details pane.
+//!
+//! Width-aware: the full legend renders when every row fits with a 1-cell
+//! margin (76 cols and up), a condensed set of essential hints otherwise —
+//! so nothing clips even at the 60x15 minimum. Two tiers, each internally
+//! uniform: dense rows pair tightly (one space), sparse rows breathe (two).
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
@@ -7,69 +12,114 @@ use ratatui::widgets::Paragraph;
 
 use crate::theme::{Sty, Tint};
 
+/// One `[key] label` hint.
+struct Hint {
+    key: &'static str,
+    label: &'static str,
+}
+
+const fn hint(key: &'static str, label: &'static str) -> Hint {
+    Hint { key, label }
+}
+
+/// Full legend — picking, navigation, batch actions.
+const PICK: &[Hint] = &[
+    hint("[Space]", "pick"),
+    hint("[Ctrl+Space]", "pick more"),
+    hint("[Enter]", "open"),
+    hint("[u]", "update"),
+    hint("[o]", "attention"),
+];
+const NAV: &[Hint] = &[
+    hint("[j/k]", "move"),
+    hint("[→]", "details"),
+    hint("[←]", "close"),
+    hint("[f]", "fetch"),
+    hint("[x]", "cancel"),
+    hint("[?]", "help"),
+    hint("[q]", "quit"),
+];
+const BULK: &[Hint] = &[
+    hint("[U]", "update all"),
+    hint("[a]", "install all"),
+    hint("[d]", "remove"),
+    hint("[p]", "jobs"),
+    hint("[r]", "rescan"),
+    hint("[t]", "releases"),
+];
+
+/// Condensed legend for 60–75 cols: the hints a first-time user needs most;
+/// everything else stays one `?` away.
+const PICK_NARROW: &[Hint] = &[
+    hint("[Space]", "pick"),
+    hint("[Enter]", "open"),
+    hint("[u]", "update"),
+    hint("[o]", "attention"),
+];
+const NAV_NARROW: &[Hint] = &[
+    hint("[j/k]", "move"),
+    hint("[→]", "details"),
+    hint("[←]", "close"),
+    hint("[?]", "help"),
+    hint("[q]", "quit"),
+];
+const BULK_NARROW: &[Hint] = &[
+    hint("[U]", "update all"),
+    hint("[a]", "install all"),
+    hint("[d]", "remove"),
+    hint("[r]", "rescan"),
+];
+
+const FULL_GAP: &str = " ";
+const NARROW_GAP: &str = "  ";
+
 pub struct KeyBarComponent;
 
 impl KeyBarComponent {
     pub fn render(&self, frame: &mut Frame, area: Rect, s: Sty) {
         frame.render_widget(
-            Paragraph::new(self.lines(s)).alignment(Alignment::Center),
+            Paragraph::new(self.rows(s, area.width)).alignment(Alignment::Center),
             area,
         );
     }
 
-    pub fn lines(&self, s: Sty) -> Vec<Line<'static>> {
-        let c = s.fg(Tint::Accent);
+    /// The legend rows that fit `width` with a 1-cell margin on each side.
+    pub fn rows(&self, s: Sty, width: u16) -> Vec<Line<'static>> {
+        let full = [
+            row(s, PICK, FULL_GAP),
+            row(s, NAV, FULL_GAP),
+            row(s, BULK, FULL_GAP),
+        ];
+        if full.iter().all(|l| l.width() as u16 + 2 <= width) {
+            return full.to_vec();
+        }
         vec![
-            Line::from(vec![
-                Span::styled("[Space]", c),
-                Span::raw(" pick  "),
-                Span::styled("[Ctrl+Space]", c),
-                Span::raw(" pick more  "),
-                Span::styled("[Enter]", c),
-                Span::raw(" open  "),
-                Span::styled("[u]", c),
-                Span::raw(" update  "),
-                Span::styled("[o]", c),
-                Span::raw(" attention"),
-            ]),
-            Line::from(vec![
-                Span::styled("[j/k]", c),
-                Span::raw(" move  "),
-                Span::styled("[→]", c),
-                Span::raw(" details  "),
-                Span::styled("[←]", c),
-                Span::raw(" close  "),
-                Span::styled("[f]", c),
-                Span::raw(" fetch  "),
-                Span::styled("[x]", c),
-                Span::raw(" cancel  "),
-                Span::styled("[?]", c),
-                Span::raw(" help  "),
-                Span::styled("[q]", c),
-                Span::raw(" quit"),
-            ]),
-            Line::from(vec![
-                Span::styled("[U]", c),
-                Span::raw(" update all  "),
-                Span::styled("[a]", c),
-                Span::raw(" install all  "),
-                Span::styled("[d]", c),
-                Span::raw(" remove  "),
-                Span::styled("[p]", c),
-                Span::raw(" jobs  "),
-                Span::styled("[r]", c),
-                Span::raw(" rescan  "),
-                Span::styled("[t]", c),
-                Span::raw(" releases"),
-            ]),
+            row(s, PICK_NARROW, NARROW_GAP),
+            row(s, NAV_NARROW, NARROW_GAP),
+            row(s, BULK_NARROW, NARROW_GAP),
         ]
     }
 }
 
+fn row(s: Sty, hints: &[Hint], gap: &'static str) -> Line<'static> {
+    let c = s.fg(Tint::Accent);
+    let mut spans = Vec::new();
+    for (i, h) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw(gap));
+        }
+        spans.push(Span::styled(h.key, c));
+        spans.push(Span::raw(format!(" {}", h.label)));
+    }
+    Line::from(spans)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::app::App;
     use crate::engine::AppInfo;
+    use crate::theme::Palette;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -107,6 +157,10 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    fn text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.to_string()).collect()
     }
 
     #[test]
@@ -158,5 +212,56 @@ mod tests {
             row3.trim_end().ends_with("releases"),
             "row 3 was clipped at 80 columns: {row3:?}"
         );
+    }
+
+    #[test]
+    fn every_row_keeps_a_cell_of_margin_at_every_width() {
+        let s = Sty::new(Palette::mono());
+        for w in 60..=120u16 {
+            for line in KeyBarComponent.rows(s, w) {
+                let width = line.width();
+                assert!(
+                    width + 2 <= w as usize,
+                    "row of {width} cells clips at {w} cols: {:?}",
+                    text(&line)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_terminals_swap_in_the_condensed_legend() {
+        let s = Sty::new(Palette::mono());
+
+        let full: String = KeyBarComponent
+            .rows(s, 80)
+            .iter()
+            .map(|l| text(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(full.contains("[Ctrl+Space] pick more"), "full: {full:?}");
+
+        let narrow: String = KeyBarComponent
+            .rows(s, 60)
+            .iter()
+            .map(|l| text(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !narrow.contains("[Ctrl+Space]"),
+            "the condensed tier must drop the low-priority hint: {narrow:?}"
+        );
+        for want in [
+            "[Space] pick",
+            "[Enter] open",
+            "[u] update",
+            "[o] attention",
+            "[j/k] move",
+            "[q] quit",
+            "[U] update all",
+            "[a] install all",
+        ] {
+            assert!(narrow.contains(want), "missing {want:?} in {narrow:?}");
+        }
     }
 }
