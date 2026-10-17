@@ -28,10 +28,12 @@ pub use list::ListComponent;
 pub use uninstall::UninstallConfirmComponent;
 
 /// Shared read-only context handed to every render. Kept minimal on purpose:
-/// components that need data take it as method arguments instead.
+/// components that need data take it as method arguments instead — the final
+/// architecture (steps 4-7) never needed anything beyond `palette`, and each
+/// component's inherent `render` carries its own data struct.
 #[expect(
     dead_code,
-    reason = "App::render adopts AppContext when ui.rs is deleted (step 8)"
+    reason = "scaffolding kept for the trait's uniformity; inherent renders carry the data"
 )]
 pub struct AppContext<'a> {
     pub palette: &'a Palette,
@@ -43,7 +45,7 @@ pub struct AppContext<'a> {
 #[derive(Debug)]
 #[expect(
     dead_code,
-    reason = "variants light up as each component lands (steps 2-7)"
+    reason = "scaffolding: concrete variants (Msg, JobsApply, …) are what components return today"
 )]
 pub enum ComponentEvent {
     Ignored,
@@ -80,7 +82,7 @@ pub enum ComponentEvent {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[expect(
     dead_code,
-    reason = "named in events once the uninstall/jobs overlays land (steps 2-3)"
+    reason = "named in events; App keeps the three overlays independent (no single active_overlay)"
 )]
 pub enum OverlayKind {
     Help,
@@ -92,11 +94,14 @@ pub trait Component {
     fn handle_key(&mut self, _key: KeyEvent) -> ComponentEvent {
         ComponentEvent::Ignored
     }
-    #[expect(dead_code, reason = "used when TaskManager starts routing Ev (step 5)")]
+    #[expect(
+        dead_code,
+        reason = "scaffolding: TaskManager::finish handles the Done bookkeeping today"
+    )]
     fn handle_background(&mut self, _ev: &Ev) {}
     #[expect(
         dead_code,
-        reason = "App::render calls it when ui.rs is deleted (step 8)"
+        reason = "scaffolding: components paint via inherent render methods with explicit data"
     )]
     fn render(&mut self, _frame: &mut Frame, _area: Rect, _ctx: &AppContext) {}
 }

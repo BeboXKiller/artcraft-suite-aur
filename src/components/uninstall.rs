@@ -126,7 +126,7 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-        term.draw(|f| crate::ui::draw(f, app)).unwrap();
+        term.draw(|f| app.render(f)).unwrap();
         let buf = term.backend().buffer().clone();
         (0..h)
             .map(|y| {

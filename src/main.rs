@@ -5,7 +5,6 @@ mod components;
 mod engine;
 mod task;
 mod theme;
-mod ui;
 
 use std::io::IsTerminal;
 use std::sync::mpsc;
@@ -223,7 +222,7 @@ fn event_loop(
     loop {
         app.drain(rx);
         app.refresh_log();
-        terminal.draw(|f| ui::draw(f, app))?;
+        terminal.draw(|f| app.render(f))?;
         if event::poll(Duration::from_millis(100))?
             && let Event::Key(k) = event::read()?
             && k.kind == KeyEventKind::Press

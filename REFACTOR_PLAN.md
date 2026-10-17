@@ -55,6 +55,12 @@ Stays on `App` (coordinator): `msg`, `quit`, `confirm_quit`, `track`,
    receive its events.
 6. `DetailsComponent` — log cache + details pane.
 7. `HeaderComponent` + `KeyBarComponent` — read-only views.
+8. ~~Delete `src/ui.rs`; `App::render` becomes the single frame entry point~~
+   **done (step 8):** layout shell + remaining full-frame tests move into
+   `App::render`/`app.rs`; `main.rs` calls `app.render(f)`; `mod ui;` dropped.
+   `AppContext`/trait-`render`/`handle_background` remain as documented
+   scaffolding (components paint via inherent methods with explicit data —
+   decision 2 held).
 8. Delete `ui.rs`, remove `mod ui;`, final green sweep.
 
 Overlays come first because they are leaves; list before tasks because tasks

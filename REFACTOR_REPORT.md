@@ -239,9 +239,48 @@ Steps land one commit each, checklist green every time (`cargo fmt`,
 | 4b | `df33a11` | List rendering: `render(TaskView)`, `row_state`, `behind_*`, `pad`, `clip` out of ui.rs | 1 moved |
 | 4c | `94ade44` | `pick_one`/`pick_toggle` into ListComponent returning `Msg`; plan amended (`enter*` stays on App) | 2 added |
 | 5 | `bd24630` | `TaskManager` (`task/mod.rs`): `busy`/`progress`/`pending`/`failed`/`max_parallel` + `is_staged`/`has_slot`/`finish`; job consts move here (re-exported from app). `try_start`/`start_now`/`pump` stay on App, delegating (need dirs/track/tx) — plan amended | 4 added; 113 total |
-| 7 | (this commit) | `HeaderComponent` (`components/header.rs`): header block + `summary` counters, fed by a `HeaderView` struct; `KeyBarComponent` (`components/keybar.rs`): `lines` + centered `render`. `App` keeps `status_line`. 4 tests moved (3 header + 1 key bar) — plan amended (file name `keybar.rs`, `HeaderView` data-as-struct) | 114 total |
+| 8 | (this commit) | `src/ui.rs` deleted: layout shell + 20 remaining full-frame tests move into `App::render`/`app.rs`; `main.rs` calls `app.render(f)`; component test helpers switch to `app.render`. Trait scaffolding expect-reasons updated to final state | 114 total |
+| 7 | `a19c6f2` | `HeaderComponent` (`components/header.rs`): header block + `summary` counters, fed by a `HeaderView` struct; `KeyBarComponent` (`components/keybar.rs`): `lines` + centered `render`. `App` keeps `status_line`. 4 tests moved (3 header + 1 key bar) — plan amended (file name `keybar.rs`, `HeaderView` data-as-struct) | 114 total |
 | 6 | `01eb55c` | `DetailsComponent` (`components/details.rs`): log cache (`refresh_log`), `draw_details`/`details_for`/`progress_line`/`tail_lines`/`short_dir`, `DETAIL_LINES`/`LOG_BYTES` out of ui.rs/app.rs; 7 tests moved + 1 new (`short_dir`) — plan amended (render takes `Option<&AppInfo>` + `&TaskManager` + `Track`) | 8; 114 total |
 
 Notes: tests grew 101 → 113 with net-zero assertion change (unit tests for the
 new home of each pure function). ui.rs is still the layout coordinator;
 `App::render` and deletion of `ui.rs` are the final step (8).
+
+## 10. Phase 2 final state
+
+All eight steps landed on `refactor/component-arch`, one commit each, with
+`cargo fmt`, `cargo clippy --all-features --all-targets -- -D warnings`,
+`cargo test`, and `scripts/tui_smoke.py` green after every step:
+
+```
+0a8ae2c (master) … ETA/stale-install work, then:
+5a748cf docs: behavior contract and refactor plan
+6e7ef3e HelpOverlayComponent
+e401b43 UninstallConfirmComponent
+a6ed099 JobsPopupComponent
+5d9f91a ListComponent state + row math
+df33a11 list rendering
+94ade44 pick_one/pick_toggle into ListComponent
+bd24630 TaskManager
+01eb55c DetailsComponent
+a19c6f2 HeaderComponent + KeyBarComponent
+(this)      ui.rs deleted; App::render
+```
+
+- `src/ui.rs` is gone; `App::render` owns the frame layout and paint order.
+- Components live in `src/components/{help,uninstall,jobs,list,details,header,keybar}.rs`
+  plus the shared `mod.rs` scaffolding (`Component`, `ComponentEvent`,
+  `OverlayKind`, `AppContext`); task state in `src/task/mod.rs`.
+- Tests: 114 (from 101) — net assertion change is zero; the growth is unit
+  tests pinning each pure function in its new home (row math, queue
+  bookkeeping, `short_dir`).
+- Behavior: unchanged throughout — the contract's quirks (key precedence,
+  paint order, End/G gap, uninstall fall-through, two-step quit) are intact,
+  verified by the moved tests and the pty smoke suite every step.
+- Recorded deviations (all in `REFACTOR_PLAN.md`): independent overlay states
+  instead of one `active_overlay`; data-as-args instead of a fat `AppContext`;
+  `enter*`/`try_start`/`pump`/`status_line`/`cancel_selected` stay on `App`
+  (orchestration); `TaskView`/`HeaderView`/details args structs instead of a
+  single context; `keybar.rs` file name; trait `render`/`handle_background`/
+  `AppContext` retained as documented scaffolding.

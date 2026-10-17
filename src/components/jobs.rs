@@ -214,7 +214,7 @@ mod tests {
         a.jobs.open = true;
         a.jobs.scratch = 5;
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        term.draw(|f| crate::ui::draw(f, &a)).unwrap();
+        term.draw(|f| a.render(f)).unwrap();
         let buf = term.backend().buffer().clone();
         let joined: String = (0..24)
             .map(|y| {
@@ -254,7 +254,7 @@ mod tests {
             stale: false,
         }]);
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        term.draw(|f| crate::ui::draw(f, &b)).unwrap();
+        term.draw(|f| b.render(f)).unwrap();
         let buf = term.backend().buffer().clone();
         let joined: String = (0..24)
             .map(|y| {
