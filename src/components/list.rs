@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -27,6 +28,10 @@ pub struct ListComponent {
     pub filter_attention: bool,
     /// apps whose description row is open (toggled with → / ←)
     pub expanded: HashSet<usize>,
+    /// live search query over the repo names (empty = no search filter)
+    pub search: String,
+    /// whether the search line has the keyboard (typing vs applied)
+    pub search_editing: bool,
 }
 
 /// Read-only slice of the task state the list needs to draw a row. Keeps
@@ -40,18 +45,46 @@ pub struct TaskView<'a> {
 }
 
 impl ListComponent {
-    /// Rows the list currently shows: all of them, or just the ones needing
-    /// attention. `failed` comes from the task side (see the module doc).
+    /// Rows the list currently shows: everything, or just the attention
+    /// rows, narrowed further by the search query. `failed` comes from the
+    /// task side (see the module doc).
     pub fn visible_rows(&self, failed: &HashMap<String, String>) -> Vec<usize> {
-        if !self.filter_attention {
-            return (0..self.apps.len()).collect();
-        }
+        let query = self.search.to_lowercase();
         self.apps
             .iter()
             .enumerate()
-            .filter(|(_, a)| self.needs_attention(a, failed))
+            .filter(|(_, a)| {
+                (!self.filter_attention || self.needs_attention(a, failed))
+                    && (query.is_empty() || a.repo.to_lowercase().contains(&query))
+            })
             .map(|(i, _)| i)
             .collect()
+    }
+
+    /// Keys while the search line has the keyboard: type to filter live,
+    /// Backspace edits, Enter keeps the query as a standing filter, Esc
+    /// clears it and returns to normal mode.
+    pub fn handle_search_key(&mut self, key: KeyEvent) -> ComponentEvent {
+        match key.code {
+            KeyCode::Esc => {
+                self.search.clear();
+                self.search_editing = false;
+                ComponentEvent::Msg("search cleared".into())
+            }
+            KeyCode::Enter => {
+                self.search_editing = false;
+                ComponentEvent::Ignored
+            }
+            KeyCode::Backspace => {
+                self.search.pop();
+                ComponentEvent::Ignored
+            }
+            KeyCode::Char(c) => {
+                self.search.push(c);
+                ComponentEvent::Ignored
+            }
+            _ => ComponentEvent::Ignored,
+        }
     }
 
     /// Missing, behind upstream, unchecked, stale install, or failed — the
@@ -80,6 +113,12 @@ impl ListComponent {
     pub fn clamp_selection(&mut self, failed: &HashMap<String, String>) {
         let vis = self.visible_rows(failed);
         if vis.is_empty() {
+            // a search with no matches keeps the query, so the pane can say
+            // so and Esc clears it; an all-clear attention view still drops
+            // its filter (an empty view must not trap the user)
+            if !self.search.is_empty() {
+                return;
+            }
             self.filter_attention = false;
             self.sel = self.sel.min(self.apps.len().saturating_sub(1));
             return;
@@ -215,11 +254,26 @@ impl ListComponent {
 
         // Filtered to nothing: the pane explains itself instead of drawing a
         // void (the header message fades with the next action; this doesn't).
-        if items.is_empty() && self.filter_attention {
-            items.push(ListItem::new(Line::from(Span::styled(
-                "  nothing needs attention — o shows everything",
-                s.fg(Tint::Muted),
-            ))));
+        if items.is_empty() {
+            let msg = if !self.search.is_empty() {
+                Some(format!(
+                    "  no match for /{} — Esc clears",
+                    clip(
+                        &self.search,
+                        inner_w.saturating_sub("  no match for / — Esc clears".len())
+                    )
+                ))
+            } else if self.filter_attention {
+                Some("  nothing needs attention — o shows everything".to_string())
+            } else {
+                None
+            };
+            if let Some(m) = msg {
+                items.push(ListItem::new(Line::from(Span::styled(
+                    m,
+                    s.fg(Tint::Muted),
+                ))));
+            }
         }
 
         let mut title = format!(" Apps ({})", vis.len());
@@ -228,6 +282,12 @@ impl ListComponent {
         }
         if self.filter_attention {
             title.push_str(" · attention only");
+        }
+        if !self.search.is_empty() {
+            title.push_str(&format!(" · /{}", self.search));
+            if self.search_editing {
+                title.push('▌');
+            }
         }
         title.push(' ');
 

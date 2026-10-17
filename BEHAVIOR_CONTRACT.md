@@ -102,7 +102,11 @@ Any key that is not `q`/`Esc` clears `confirm_quit`.
 
 ### 2.3 List
 
-- Title: ` Apps (n) · k picked · attention only ` (suffix parts conditional).
+- Title: ` Apps (n) · k picked · attention only · /query ` (suffix parts
+  conditional; a `▌` marks the search line while it has the keyboard).
+- Search: `/` focuses the search line; typing filters rows by repo name
+  (case-insensitive), Backspace edits, Enter keeps the filter, Esc clears it —
+  while typing and, with a standing filter, in normal mode too.
 - Columns: mark (3) + glyph (6) fixed, phrase reserve 22, repo + version share
   the remaining width; version column hides below 52 usable columns.
 - A faint column-header row (`app` / `version` / `state`) is pinned under the

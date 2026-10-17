@@ -359,6 +359,15 @@ impl App {
             self.confirm_quit = false;
             return;
         }
+        // Typing the search line swallows every printable key — `?` types a
+        // literal, `q` types a letter; Ctrl chords above still win.
+        if self.list.search_editing {
+            if let ComponentEvent::Msg(m) = self.list.handle_search_key(key) {
+                self.msg = m;
+            }
+            self.clamp_selection();
+            return;
+        }
         if key.code == Char('?') {
             self.help.toggle();
             self.confirm_quit = false;
@@ -391,7 +400,18 @@ impl App {
             self.confirm_quit = false;
         }
         match key.code {
-            Char('q') | Esc => self.request_quit(),
+            Esc => {
+                if !self.list.search.is_empty() {
+                    // a standing search yields to Esc before quit does
+                    self.list.search.clear();
+                    self.clamp_selection();
+                    self.msg = "search cleared".into();
+                    self.confirm_quit = false;
+                } else {
+                    self.request_quit();
+                }
+            }
+            Char('q') => self.request_quit(),
             Up | Char('k') => self.move_sel(-1),
             Down | Char('j') => self.move_sel(1),
             PageUp => self.move_sel(-(PAGE as isize)),
@@ -462,6 +482,9 @@ impl App {
             Char('r') => {
                 self.rescan_all();
                 self.msg = "refreshing…".into();
+            }
+            Char('/') => {
+                self.list.search_editing = true;
             }
             Char('o') => {
                 self.list.filter_attention = !self.list.filter_attention;
@@ -988,6 +1011,91 @@ mod tests {
             !head.contains('□') && !head.contains('▶'),
             "labels must not carry row marks: {head:?}"
         );
+    }
+
+    #[test]
+    fn slash_filters_the_list_live_and_esc_clears() {
+        let healthy = || {
+            vec![
+                one("photocraft", true, true, Some(0)),
+                one("wordcraft", true, true, Some(0)),
+                one("cadcraft", true, true, Some(0)),
+            ]
+        };
+        let mut a = App::with_apps(healthy());
+        a.on_key(key(KeyCode::Char('/')));
+        assert!(a.list.search_editing, "/ must focus the search line");
+
+        // every repo contains "craft" — nothing filters yet
+        for c in "craft".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(a.visible_rows(), vec![0, 1, 2]);
+
+        // back to "ph": only photocraft
+        for _ in 0.."craft".len() {
+            a.on_key(key(KeyCode::Backspace));
+        }
+        assert!(a.list.search.is_empty());
+        a.on_key(key(KeyCode::Char('p')));
+        a.on_key(key(KeyCode::Char('h')));
+        assert_eq!(a.visible_rows(), vec![0]);
+        // the title wears the live query with the typing cursor
+        let rows = render(&a, 80, 24).join("\n");
+        assert!(rows.contains("/ph▌"), "title cue missing: {rows:?}");
+
+        // Esc while typing clears the query and unfocuses
+        a.on_key(key(KeyCode::Esc));
+        assert!(!a.list.search_editing);
+        assert!(a.list.search.is_empty());
+        assert_eq!(a.visible_rows(), vec![0, 1, 2]);
+
+        // Enter keeps the filter as a standing one; Esc in normal mode
+        // clears it instead of quitting
+        a.on_key(key(KeyCode::Char('/')));
+        a.on_key(key(KeyCode::Char('c')));
+        a.on_key(key(KeyCode::Char('a')));
+        assert_eq!(a.visible_rows(), vec![2]);
+        a.on_key(key(KeyCode::Enter));
+        assert!(!a.list.search_editing);
+        assert_eq!(a.visible_rows(), vec![2], "Enter must keep the filter");
+        a.on_key(key(KeyCode::Esc));
+        assert!(!a.quit, "Esc cleared the standing filter, not the app");
+        assert!(a.list.search.is_empty());
+        assert_eq!(a.visible_rows(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn typing_while_searching_never_acts_on_the_app() {
+        let mut a = App::with_apps(vec![
+            one("photocraft", true, true, Some(0)),
+            one("wordcraft", true, true, Some(0)),
+        ]);
+        a.list.sel = 1;
+        a.on_key(key(KeyCode::Char('/')));
+        a.on_key(key(KeyCode::Char('q')));
+        assert!(!a.quit, "q must type, not quit");
+        a.on_key(key(KeyCode::Char('?')));
+        assert!(!a.help.open, "? must type, not open help");
+        assert_eq!(a.list.search, "q?");
+
+        // back to "photo": the highlight clamps onto the matching row
+        a.on_key(key(KeyCode::Backspace));
+        a.on_key(key(KeyCode::Backspace));
+        assert!(a.list.search.is_empty());
+        for c in "photo".chars() {
+            a.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(a.list.sel, 0, "highlight must clamp onto a visible row");
+    }
+
+    #[test]
+    fn a_search_with_no_matches_says_so_in_the_pane() {
+        let mut a = App::with_apps(apps(3));
+        a.list.search = "zzz".into();
+        let rows = render(&a, 80, 24).join("\n");
+        assert!(rows.contains("no match for /zzz"), "{rows:?}");
+        assert!(rows.contains("Esc clears"), "{rows:?}");
     }
 
     #[test]

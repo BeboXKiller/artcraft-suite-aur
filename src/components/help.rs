@@ -79,6 +79,7 @@ pub fn render_help_card(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
         Line::from("  → / l            open a description under the app"),
         Line::from("  ← / h            close it again"),
         Line::from("  o               attention only (hide apps that are fine)"),
+        Line::from("  /               search by name — Enter keeps, Esc clears"),
         Line::from("  t               track releases — rows and u follow tags"),
         Line::from(""),
         Line::from(Span::styled(
