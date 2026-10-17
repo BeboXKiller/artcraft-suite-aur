@@ -1,13 +1,20 @@
 //! The suite list: rows, highlight, picks, attention filter.
 //!
-//! Step 4a of the refactor: state plus the pure row math. Rendering and the
-//! `enter`/pick decision logic stay in `ui.rs`/`app.rs` until steps 4b/4c.
-//! Task-dependent reads take the failed map as an argument (AppContext stays
-//! minimal; TaskManager owns that data from step 5 on).
+//! Step 4b adds the rendering (`render`, `row_state` and helpers) moved
+//! verbatim from `ui.rs`; task state is passed as arguments. The `enter`/pick
+//! decision logic stays in `app.rs` until step 4c. Task-dependent reads take
+//! the failed map as an argument (AppContext stays minimal; TaskManager owns
+//! that data from step 5 on).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::engine::AppInfo;
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, List, ListItem, ListState};
+
+use crate::engine::{self, Action, AppInfo, Track};
+use crate::theme::{Sty, Tint};
 
 #[derive(Default)]
 pub struct ListComponent {
@@ -17,6 +24,16 @@ pub struct ListComponent {
     pub filter_attention: bool,
     /// apps whose description row is open (toggled with → / ←)
     pub expanded: HashSet<usize>,
+}
+
+/// Read-only slice of the task state the list needs to draw a row. Keeps
+/// [`ListComponent::render`] inside clippy's argument limit without growing
+/// `AppContext`; TaskManager hands these out from step 5 on.
+pub struct TaskView<'a> {
+    pub busy: &'a HashMap<String, String>,
+    pub pending: &'a VecDeque<(String, Action)>,
+    pub failed: &'a HashMap<String, String>,
+    pub track: Track,
 }
 
 impl ListComponent {
@@ -89,6 +106,197 @@ impl ListComponent {
             v.sort_unstable();
             v
         }
+    }
+
+    /// The list pane. Task state arrives as a [`TaskView`] (see the module
+    /// doc). Moved verbatim from `ui::draw_list`.
+    pub fn render(&self, frame: &mut Frame, area: Rect, s: Sty, tasks: TaskView) {
+        let TaskView {
+            busy,
+            pending,
+            failed,
+            track,
+        } = tasks;
+        // borders (2) + highlight symbol (2)
+        let inner_w = area.width.saturating_sub(4) as usize;
+        // Responsive columns: mark(3) + glyph(6) are fixed, the status phrase keeps
+        // a 22-column reserve, and repo + version share the rest — version taking
+        // two thirds of the slack, so the middle column stops being the cut-off one
+        // as the terminal grows. Below 52 usable columns the version hides entirely.
+        // The phrase reserve is sized for the longest phrase ("999 commits behind",
+        // 19 chars) plus a little right padding so it never crowds the border.
+        let show_version = inner_w >= 52;
+        let slack = inner_w.saturating_sub(9 + 16 + 11 + 22);
+        let version_extra = slack * 2 / 3;
+        let (repo_w, version_w) = if show_version {
+            (16 + slack - version_extra, 11 + version_extra)
+        } else {
+            (16 + 11 + slack, 0)
+        };
+
+        let vis = self.visible_rows(failed);
+        let mut items: Vec<ListItem> = Vec::with_capacity(vis.len() * 2);
+        let mut sel_pos = None;
+        for &idx in &vis {
+            let a = &self.apps[idx];
+            let (glyph, phrase, tint) = row_state(a, busy, pending, failed, track);
+            let selected = idx == self.sel;
+            let bar = s.on_bar();
+            let cell = |t: Tint| if selected { bar } else { s.fg(t) };
+            let (mark, mark_style) = if self.picks.contains(&idx) {
+                (
+                    "■",
+                    if selected {
+                        bar.bold()
+                    } else {
+                        s.fg(Tint::Accent).bold()
+                    },
+                )
+            } else {
+                ("□", cell(Tint::Faint))
+            };
+            let mut spans = vec![
+                Span::styled(format!(" {mark} "), mark_style),
+                Span::styled(format!(" {} ", pad(&glyph, 4)), cell(tint)),
+                Span::styled(
+                    pad(a.repo, repo_w),
+                    if selected { bar.bold() } else { s.bold() },
+                ),
+            ];
+            if show_version {
+                spans.push(Span::styled(
+                    pad(a.version.as_deref().unwrap_or("-"), version_w),
+                    cell(Tint::Muted),
+                ));
+            }
+            spans.push(Span::styled(format!(" {phrase}"), cell(tint)));
+            if selected {
+                sel_pos = Some(items.len());
+            }
+            items.push(ListItem::new(Line::from(spans)));
+            if self.expanded.contains(&idx) {
+                items.push(ListItem::new(Line::from(Span::styled(
+                    format!(
+                        "        {}",
+                        clip(engine::description_of(a.repo), inner_w.saturating_sub(8))
+                    ),
+                    s.fg(Tint::Muted),
+                ))));
+            }
+        }
+
+        let mut title = format!(" Apps ({})", vis.len());
+        if !self.picks.is_empty() {
+            title.push_str(&format!(" · {} picked", self.picks.len()));
+        }
+        if self.filter_attention {
+            title.push_str(" · attention only");
+        }
+        title.push(' ');
+        let list = List::new(items)
+            .block(Block::bordered().title(title))
+            .highlight_style(s.hl())
+            .highlight_symbol("▶ ");
+        let mut state = ListState::default();
+        state.select(sel_pos);
+        frame.render_stateful_widget(list, area, &mut state);
+    }
+}
+
+/// One row's state: a glyph, the same fact in words, and its brand colour.
+///
+/// Colour never carries the meaning alone — the phrase and the glyph do.
+/// Moved verbatim from `ui::row_state`.
+pub fn row_state(
+    a: &AppInfo,
+    busy: &HashMap<String, String>,
+    pending: &VecDeque<(String, Action)>,
+    failed: &HashMap<String, String>,
+    track: Track,
+) -> (String, String, Tint) {
+    if let Some(verb) = busy.get(a.repo) {
+        return ("◐".into(), format!("{verb}…"), Tint::Accent);
+    }
+    if pending.iter().any(|(r, _)| r == a.repo) {
+        return ("◌".into(), "queued".into(), Tint::Accent);
+    }
+    if failed.contains_key(a.repo) {
+        return ("✗".into(), "build failed".into(), Tint::Bad);
+    }
+    if a.installed {
+        if !a.cloned {
+            // installed by the launcher/an AUR package, no source on disk:
+            // there is nothing to compare against, so don't claim "up to date"
+            return ("✓".into(), "installed".into(), Tint::Good);
+        }
+        match a.behind {
+            Some(n) if n > 0 => (
+                behind_glyph(n),
+                format!("{n} {} behind", behind_word(track, n)),
+                Tint::Warn,
+            ),
+            // the clone is current but the binary was built from an older
+            // HEAD — a pull whose build never finished. Say so; `u` rebuilds.
+            Some(_) if a.stale => ("↻".into(), "update ready".into(), Tint::Warn),
+            Some(_) => ("✓".into(), "up to date".into(), Tint::Good),
+            // cloned, but the upstream check hasn't landed (offline or no
+            // upstream) — say so instead of trusting stale refs
+            None if a.stale => ("↻".into(), "update ready".into(), Tint::Warn),
+            None => ("?".into(), "not checked".into(), Tint::Muted),
+        }
+    } else if a.cloned {
+        ("○".into(), "cloned, not built".into(), Tint::Muted)
+    } else {
+        ("·".into(), "not installed".into(), Tint::Faint)
+    }
+}
+
+pub(crate) fn behind_glyph(n: u64) -> String {
+    if n < 100 {
+        format!("↑{n}")
+    } else {
+        "↑99+".into()
+    }
+}
+
+pub(crate) fn commit_word(n: u64) -> &'static str {
+    if n == 1 { "commit" } else { "commits" }
+}
+
+/// "commit(s)" or "release(s)" — what `behind` counts under the current track.
+pub(crate) fn behind_word(track: Track, n: u64) -> &'static str {
+    match track {
+        Track::Commits => commit_word(n),
+        Track::Releases => {
+            if n == 1 {
+                "release"
+            } else {
+                "releases"
+            }
+        }
+    }
+}
+
+/// Pad to `w`, truncating with an ellipsis so a long field can never push the
+/// columns after it out of the pane.
+pub(crate) fn pad(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        format!("{:1$}", s, w)
+    } else {
+        let keep = w.saturating_sub(1);
+        let cut: String = s.chars().take(keep).collect();
+        format!("{cut}…")
+    }
+}
+
+/// Trim to `w` columns with an ellipsis, for free-form lines.
+pub(crate) fn clip(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        s.to_string()
+    } else {
+        let keep = w.saturating_sub(1);
+        let cut: String = s.chars().take(keep).collect();
+        format!("{cut}…")
     }
 }
 
@@ -205,5 +413,12 @@ mod tests {
         l.picks.insert(0);
         l.picks.insert(1);
         assert_eq!(l.targets(), vec![0, 1], "picks are sorted, not hashed");
+    }
+
+    #[test]
+    fn pad_truncates_and_pads() {
+        assert_eq!(pad("abc", 6), "abc   ");
+        assert_eq!(pad("abcdef", 4), "abc…");
+        assert_eq!(pad("abc", 3), "abc");
     }
 }

@@ -4,9 +4,10 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Paragraph, Wrap};
 
 use crate::app::{App, Tone};
+use crate::components::list::{behind_word, clip};
 use crate::engine::{self, AppInfo, Track};
 use crate::theme::{Sty, Tint};
 
@@ -65,7 +66,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     frame.render_widget(Paragraph::new(head_text).block(head_block), head);
 
-    draw_list(frame, app, main, s);
+    app.list.render(
+        frame,
+        main,
+        s,
+        crate::components::list::TaskView {
+            busy: &app.busy,
+            pending: &app.pending,
+            failed: &app.failed,
+            track: app.track,
+        },
+    );
     draw_details(frame, app, tail, s);
     frame.render_widget(
         Paragraph::new(key_bar(s)).alignment(Alignment::Center),
@@ -132,162 +143,6 @@ fn summary(app: &App, s: Sty) -> Vec<Span<'static>> {
         ));
     }
     spans
-}
-
-fn draw_list(frame: &mut Frame, app: &App, area: Rect, s: Sty) {
-    // borders (2) + highlight symbol (2)
-    let inner_w = area.width.saturating_sub(4) as usize;
-    // Responsive columns: mark(3) + glyph(6) are fixed, the status phrase keeps
-    // a 22-column reserve, and repo + version share the rest — version taking
-    // two thirds of the slack, so the middle column stops being the cut-off one
-    // as the terminal grows. Below 52 usable columns the version hides entirely.
-    // The phrase reserve is sized for the longest phrase ("999 commits behind",
-    // 19 chars) plus a little right padding so it never crowds the border.
-    let show_version = inner_w >= 52;
-    let slack = inner_w.saturating_sub(9 + 16 + 11 + 22);
-    let version_extra = slack * 2 / 3;
-    let (repo_w, version_w) = if show_version {
-        (16 + slack - version_extra, 11 + version_extra)
-    } else {
-        (16 + 11 + slack, 0)
-    };
-
-    let vis = app.visible_rows();
-    let mut items: Vec<ListItem> = Vec::with_capacity(vis.len() * 2);
-    let mut sel_pos = None;
-    for &idx in &vis {
-        let a = &app.list.apps[idx];
-        let (glyph, phrase, tint) = row_state(app, a);
-        let selected = idx == app.list.sel;
-        let bar = s.on_bar();
-        let cell = |t: Tint| if selected { bar } else { s.fg(t) };
-        let (mark, mark_style) = if app.list.picks.contains(&idx) {
-            (
-                "■",
-                if selected {
-                    bar.bold()
-                } else {
-                    s.fg(Tint::Accent).bold()
-                },
-            )
-        } else {
-            ("□", cell(Tint::Faint))
-        };
-        let mut spans = vec![
-            Span::styled(format!(" {mark} "), mark_style),
-            Span::styled(format!(" {} ", pad(&glyph, 4)), cell(tint)),
-            Span::styled(
-                pad(a.repo, repo_w),
-                if selected { bar.bold() } else { s.bold() },
-            ),
-        ];
-        if show_version {
-            spans.push(Span::styled(
-                pad(a.version.as_deref().unwrap_or("-"), version_w),
-                cell(Tint::Muted),
-            ));
-        }
-        spans.push(Span::styled(format!(" {phrase}"), cell(tint)));
-        if selected {
-            sel_pos = Some(items.len());
-        }
-        items.push(ListItem::new(Line::from(spans)));
-        if app.list.expanded.contains(&idx) {
-            items.push(ListItem::new(Line::from(Span::styled(
-                format!(
-                    "        {}",
-                    clip(
-                        crate::engine::description_of(a.repo),
-                        inner_w.saturating_sub(8)
-                    )
-                ),
-                s.fg(Tint::Muted),
-            ))));
-        }
-    }
-
-    let mut title = format!(" Apps ({})", vis.len());
-    if !app.list.picks.is_empty() {
-        title.push_str(&format!(" · {} picked", app.list.picks.len()));
-    }
-    if app.list.filter_attention {
-        title.push_str(" · attention only");
-    }
-    title.push(' ');
-    let list = List::new(items)
-        .block(Block::bordered().title(title))
-        .highlight_style(s.hl())
-        .highlight_symbol("▶ ");
-    let mut state = ListState::default();
-    state.select(sel_pos);
-    frame.render_stateful_widget(list, area, &mut state);
-}
-
-/// One row's state: a glyph, the same fact in words, and its brand colour.
-///
-/// Colour never carries the meaning alone — the phrase and the glyph do.
-fn row_state(app: &App, a: &AppInfo) -> (String, String, Tint) {
-    if let Some(verb) = app.busy.get(a.repo) {
-        return ("◐".into(), format!("{verb}…"), Tint::Accent);
-    }
-    if app.pending.iter().any(|(r, _)| r == a.repo) {
-        return ("◌".into(), "queued".into(), Tint::Accent);
-    }
-    if app.failed.contains_key(a.repo) {
-        return ("✗".into(), "build failed".into(), Tint::Bad);
-    }
-    if a.installed {
-        if !a.cloned {
-            // installed by the launcher/an AUR package, no source on disk:
-            // there is nothing to compare against, so don't claim "up to date"
-            return ("✓".into(), "installed".into(), Tint::Good);
-        }
-        match a.behind {
-            Some(n) if n > 0 => (
-                behind_glyph(n),
-                format!("{n} {} behind", behind_word(app.track, n)),
-                Tint::Warn,
-            ),
-            // the clone is current but the binary was built from an older
-            // HEAD — a pull whose build never finished. Say so; `u` rebuilds.
-            Some(_) if a.stale => ("↻".into(), "update ready".into(), Tint::Warn),
-            Some(_) => ("✓".into(), "up to date".into(), Tint::Good),
-            // cloned, but the upstream check hasn't landed (offline or no
-            // upstream) — say so instead of trusting stale refs
-            None if a.stale => ("↻".into(), "update ready".into(), Tint::Warn),
-            None => ("?".into(), "not checked".into(), Tint::Muted),
-        }
-    } else if a.cloned {
-        ("○".into(), "cloned, not built".into(), Tint::Muted)
-    } else {
-        ("·".into(), "not installed".into(), Tint::Faint)
-    }
-}
-
-fn behind_glyph(n: u64) -> String {
-    if n < 100 {
-        format!("↑{n}")
-    } else {
-        "↑99+".into()
-    }
-}
-
-fn commit_word(n: u64) -> &'static str {
-    if n == 1 { "commit" } else { "commits" }
-}
-
-/// "commit(s)" or "release(s)" — what `behind` counts under the current track.
-fn behind_word(track: Track, n: u64) -> &'static str {
-    match track {
-        Track::Commits => commit_word(n),
-        Track::Releases => {
-            if n == 1 {
-                "release"
-            } else {
-                "releases"
-            }
-        }
-    }
 }
 
 /// The bottom pane: the live log while a task runs, the update's contents
@@ -578,29 +433,6 @@ fn key_bar(s: Sty) -> Vec<Line<'static>> {
             Span::raw(" releases"),
         ]),
     ]
-}
-
-/// Pad to `w`, truncating with an ellipsis so a long field can never push the
-/// columns after it out of the pane.
-fn pad(s: &str, w: usize) -> String {
-    if s.chars().count() <= w {
-        format!("{:1$}", s, w)
-    } else {
-        let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
-        t.push('…');
-        t
-    }
-}
-
-/// Truncate to at most `w` characters, marking the cut with an ellipsis.
-fn clip(s: &str, w: usize) -> String {
-    if s.chars().count() <= w {
-        s.to_string()
-    } else {
-        let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
-        t.push('…');
-        t
-    }
 }
 
 #[cfg(test)]
@@ -1232,13 +1064,6 @@ mod tests {
             !render(&b, 80, 24).join("\n").contains('⚙'),
             "idle badge leaked"
         );
-    }
-
-    #[test]
-    fn pad_truncates_and_pads() {
-        assert_eq!(pad("abc", 6), "abc   ");
-        assert_eq!(pad("abcdef", 4), "abc…");
-        assert_eq!(pad("abc", 3), "abc");
     }
 
     #[test]
