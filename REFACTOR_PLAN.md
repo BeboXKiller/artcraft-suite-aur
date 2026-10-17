@@ -87,6 +87,8 @@ pub enum ComponentEvent {
     UninstallConfirm,
     /// Open the parallel-builds popup.
     JobsOpen,
+    /// Adopt the popup's scratch limit (`Enter` in the `p` editor).
+    JobsApply,
     /// Full rescan (`r`) — App owns the pipeline.
     Rescan,
     /// Flip the track (`t`) and rescan.

@@ -13,8 +13,10 @@ use crate::engine::{Action, Ev};
 use crate::theme::Palette;
 
 pub mod help;
+pub mod jobs;
 pub mod uninstall;
 pub use help::HelpOverlayComponent;
+pub use jobs::JobsPopupComponent;
 pub use uninstall::UninstallConfirmComponent;
 
 /// Shared read-only context handed to every render. Kept minimal on purpose:
@@ -47,6 +49,8 @@ pub enum ComponentEvent {
     UninstallConfirm,
     /// Open the parallel-builds popup.
     JobsOpen,
+    /// Adopt the popup's scratch limit (`Enter` in the `p` editor).
+    JobsApply,
     /// Full rescan (`r`) — App owns the pipeline.
     Rescan,
     /// Flip the track (`t`) and rescan.

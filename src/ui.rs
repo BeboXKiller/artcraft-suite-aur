@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, Tone};
 use crate::engine::{self, AppInfo, Track};
@@ -76,9 +76,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         crate::components::help::render_help_card(frame, area, s, app.help.scroll);
     }
     app.uninstall.render(frame, area, s, &app.apps);
-    if app.jobs_popup {
-        draw_jobs_popup(frame, area, s, app.jobs_scratch);
-    }
+    app.jobs.render(frame, area, s);
 }
 
 /// Right-aligned header counters: how much is current, behind, or missing.
@@ -576,42 +574,6 @@ fn key_bar(s: Sty) -> Vec<Line<'static>> {
             Span::raw(" releases"),
         ]),
     ]
-}
-
-/// Centered editor for the parallel-build limit (`p`): the number, the honest
-/// warning for weak machines, and how to change or leave.
-fn draw_jobs_popup(frame: &mut Frame, area: Rect, s: Sty, scratch: usize) {
-    let lines: Vec<Line> = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            format!("  {scratch}"),
-            s.fg(Tint::Accent).bold(),
-        )),
-        Line::from(""),
-        Line::from("  apps compiling at once."),
-        Line::from(Span::styled(
-            "  Low-spec PC? Stick to 1–2.",
-            s.fg(Tint::Warn),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  ↑↓ or +/- change · Enter applies · Esc cancels",
-            s.fg(Tint::Faint),
-        )),
-    ];
-    let w = area.width.min(50);
-    let box_h = (lines.len() as u16 + 2).min(area.height);
-    let rect = Rect::new(
-        area.x + (area.width.saturating_sub(w)) / 2,
-        area.y + (area.height.saturating_sub(box_h)) / 2,
-        w,
-        box_h,
-    );
-    frame.render_widget(Clear, rect);
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::bordered().title(" Parallel builds ")),
-        rect,
-    );
 }
 
 /// Pad to `w`, truncating with an ellipsis so a long field can never push the
@@ -1249,29 +1211,6 @@ mod tests {
         assert!(
             joined.contains("too small"),
             "no min-size message: {joined:?}"
-        );
-    }
-
-    #[test]
-    fn jobs_popup_shows_the_value_and_the_low_spec_warning() {
-        let mut a = app();
-        a.jobs_popup = true;
-        a.jobs_scratch = 5;
-        let joined = render(&a, 80, 24).join("\n");
-        assert!(joined.contains("Parallel builds"), "{joined:?}");
-        assert!(joined.contains("apps compiling at once."), "{joined:?}");
-        assert!(joined.contains("Low-spec PC? Stick to 1–2."), "{joined:?}");
-        assert!(joined.contains("Enter applies · Esc cancels"), "{joined:?}");
-        // the card is small: the key bar stays readable around it
-        assert!(
-            joined.contains("[q] quit"),
-            "popup ate the frame: {joined:?}"
-        );
-        // and it never shows without the p key
-        let b = app();
-        assert!(
-            !render(&b, 80, 24).join("\n").contains("Parallel builds"),
-            "popup leaked into a normal frame"
         );
     }
 
