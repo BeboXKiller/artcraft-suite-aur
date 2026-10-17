@@ -123,12 +123,26 @@ pub fn render_help_card(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
         box_h,
     );
     let inner_h = box_h.saturating_sub(2) as usize;
-    let offset = scroll.min(lines.len().saturating_sub(inner_h));
+    let total = lines.len();
+    let offset = scroll.min(total.saturating_sub(inner_h));
     let visible: Vec<Line> = lines.into_iter().skip(offset).collect();
+    // A cut-off card says where the window sits (`4-25/41`); a card that
+    // fits keeps the clean title. The counter doubles as the "more below"
+    // cue the legend never had.
+    let title = if inner_h > 0 && total > inner_h {
+        format!(
+            " Help — {}-{}/{} · j/k scroll · ? or Esc to close ",
+            offset + 1,
+            offset + inner_h,
+            total
+        )
+    } else {
+        " Help — j/k scroll · ? or Esc to close ".to_string()
+    };
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Paragraph::new(visible)
-            .block(Block::bordered().title(" Help — j/k scroll · ? or Esc to close "))
+            .block(Block::bordered().title(title))
             .wrap(Wrap { trim: false }),
         rect,
     );
@@ -309,6 +323,72 @@ mod tests {
         assert!(
             !bottom.contains("Navigation"),
             "scroll clamp not applied: {bottom:?}"
+        );
+    }
+
+    /// Pull the `first-last/total` counter out of the card title, if any.
+    fn counter(joined: &str) -> Option<(usize, usize, usize)> {
+        let start = joined.find("Help — ")? + "Help — ".len();
+        let rest = &joined[start..];
+        let end = rest.find(" · j/k scroll")?;
+        let (a, r) = rest[..end].split_once('-')?;
+        let (b, t) = r.split_once('/')?;
+        Some((a.parse().ok()?, b.parse().ok()?, t.parse().ok()?))
+    }
+
+    #[test]
+    fn help_title_reports_the_window_only_while_the_legend_is_cut() {
+        let mut app = App::with_apps(vec![AppInfo {
+            repo: "photocraft",
+            dir: std::path::PathBuf::from("/nonexistent"),
+            pkg: Some("photocraft".into()),
+            cloned: true,
+            installed: true,
+            version: None,
+            behind: Some(0),
+            commits: Vec::new(),
+            menu: true,
+            stale: false,
+        }]);
+        app.help.open = true;
+
+        // cut off at 80x24: the counter promises the rest of the legend
+        let top = render(&app, 80, 24).join("\n");
+        let (first, last, total) = counter(&top)
+            .unwrap_or_else(|| panic!("no position counter on a cut-off card: {top:?}"));
+        assert_eq!(first, 1, "top of the card starts at line 1: {top:?}");
+        assert!(
+            last < total && last > 1,
+            "window must be smaller than the legend: {first}-{last}/{total}"
+        );
+        assert!(
+            top.contains("Esc to close"),
+            "the close hint must survive the counter: {top:?}"
+        );
+
+        // scrolled to the end (the offset clamps): the window touches the end
+        app.help.scroll = 99;
+        let end = render(&app, 80, 24).join("\n");
+        let (f2, l2, t2) =
+            counter(&end).unwrap_or_else(|| panic!("counter vanished at the end: {end:?}"));
+        assert!(f2 > 1, "scroll had no effect on the counter: {end:?}");
+        assert_eq!(l2, t2, "clamped window must reach the last line: {end:?}");
+
+        // tall enough for every line: clean title, no counter
+        app.help.scroll = 0;
+        let tall = render(&app, 80, 46).join("\n");
+        assert!(
+            counter(&tall).is_none(),
+            "counter on a card that fits whole: {tall:?}"
+        );
+        assert!(tall.contains("Esc to close"));
+
+        // and the counted title still fits the 60x15 minimum
+        let min = render(&app, 60, 15).join("\n");
+        assert!(counter(&min).is_some(), "no counter at 60x15: {min:?}");
+        assert!(
+            min.contains("· ? or Esc to close"),
+            "counted title clipped at 60 columns: {min:?}"
         );
     }
 }
