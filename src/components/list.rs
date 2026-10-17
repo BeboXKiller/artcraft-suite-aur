@@ -1,4 +1,4 @@
-//! The suite list: rows, highlight, picks, attention filter.
+//! The suite list: rows, highlight, picks, installed filter, search.
 //!
 //! Step 4b adds the rendering (`render`, `row_state` and helpers) moved
 //! verbatim from `ui.rs`; task state is passed as arguments. The `enter`/pick
@@ -25,7 +25,8 @@ pub struct ListComponent {
     pub apps: Vec<AppInfo>,
     pub sel: usize,
     pub picks: HashSet<usize>,
-    pub filter_attention: bool,
+    /// `o`: show only the apps that are actually installed
+    pub filter_installed: bool,
     /// apps whose description row is open (toggled with → / ←)
     pub expanded: HashSet<usize>,
     /// live search query over the repo names (empty = no search filter)
@@ -45,16 +46,15 @@ pub struct TaskView<'a> {
 }
 
 impl ListComponent {
-    /// Rows the list currently shows: everything, or just the attention
-    /// rows, narrowed further by the search query. `failed` comes from the
-    /// task side (see the module doc).
-    pub fn visible_rows(&self, failed: &HashMap<String, String>) -> Vec<usize> {
+    /// Rows the list currently shows: everything, or just the installed
+    /// apps under `o`, narrowed further by the search query.
+    pub fn visible_rows(&self) -> Vec<usize> {
         let query = self.search.to_lowercase();
         self.apps
             .iter()
             .enumerate()
             .filter(|(_, a)| {
-                (!self.filter_attention || self.needs_attention(a, failed))
+                (!self.filter_installed || a.installed)
                     && (query.is_empty() || a.repo.to_lowercase().contains(&query))
             })
             .map(|(i, _)| i)
@@ -87,19 +87,9 @@ impl ListComponent {
         }
     }
 
-    /// Missing, behind upstream, unchecked, stale install, or failed — the
-    /// rows `o` keeps.
-    pub fn needs_attention(&self, a: &AppInfo, failed: &HashMap<String, String>) -> bool {
-        !a.installed
-            || failed.contains_key(a.repo)
-            || a.behind.is_some_and(|n| n > 0)
-            || a.stale
-            || (a.cloned && a.behind.is_none())
-    }
-
     /// Step the highlight by `step` rows *within what is visible*.
-    pub fn move_sel(&mut self, step: isize, failed: &HashMap<String, String>) {
-        let vis = self.visible_rows(failed);
+    pub fn move_sel(&mut self, step: isize) {
+        let vis = self.visible_rows();
         if vis.is_empty() {
             return;
         }
@@ -110,16 +100,16 @@ impl ListComponent {
 
     /// Keep the highlight on a row the list is actually showing. An empty
     /// view drops the filter rather than trapping the user on nothing.
-    pub fn clamp_selection(&mut self, failed: &HashMap<String, String>) {
-        let vis = self.visible_rows(failed);
+    pub fn clamp_selection(&mut self) {
+        let vis = self.visible_rows();
         if vis.is_empty() {
             // a search with no matches keeps the query, so the pane can say
-            // so and Esc clears it; an all-clear attention view still drops
+            // so and Esc clears it; an all-empty installed view still drops
             // its filter (an empty view must not trap the user)
             if !self.search.is_empty() {
                 return;
             }
-            self.filter_attention = false;
+            self.filter_installed = false;
             self.sel = self.sel.min(self.apps.len().saturating_sub(1));
             return;
         }
@@ -201,7 +191,7 @@ impl ListComponent {
             (16 + 11 + slack, 0)
         };
 
-        let vis = self.visible_rows(failed);
+        let vis = self.visible_rows();
         let mut items: Vec<ListItem> = Vec::with_capacity(vis.len() * 2);
         let mut sel_pos = None;
         for &idx in &vis {
@@ -263,8 +253,8 @@ impl ListComponent {
                         inner_w.saturating_sub("  no match for / — Esc clears".len())
                     )
                 ))
-            } else if self.filter_attention {
-                Some("  nothing needs attention — o shows everything".to_string())
+            } else if self.filter_installed {
+                Some("  no apps installed yet — o shows everything".to_string())
             } else {
                 None
             };
@@ -280,8 +270,8 @@ impl ListComponent {
         if !self.picks.is_empty() {
             title.push_str(&format!(" · {} picked", self.picks.len()));
         }
-        if self.filter_attention {
-            title.push_str(" · attention only");
+        if self.filter_installed {
+            title.push_str(" · installed only");
         }
         if !self.search.is_empty() {
             title.push_str(&format!(" · /{}", self.search));
@@ -468,35 +458,19 @@ mod tests {
         }
     }
 
-    fn no_fail() -> HashMap<String, String> {
-        HashMap::new()
-    }
-
     #[test]
-    fn visible_rows_is_everything_or_only_the_attention_rows() {
+    fn visible_rows_is_everything_or_only_the_installed_rows() {
         let mut l = ListComponent {
             apps: vec![
-                info("a", true, true, Some(0)), // fine
+                info("a", true, true, Some(0)), // installed, fine
                 info("b", false, false, None),  // missing
-                info("c", true, true, Some(2)), // behind
+                info("c", true, true, Some(2)), // installed, behind
             ],
             ..Default::default()
         };
-        assert_eq!(l.visible_rows(&no_fail()), vec![0, 1, 2]);
-        l.filter_attention = true;
-        assert_eq!(l.visible_rows(&no_fail()), vec![1, 2]);
-    }
-
-    #[test]
-    fn a_failed_row_needs_attention_even_when_installed_and_current() {
-        let l = ListComponent {
-            apps: vec![info("a", true, true, Some(0))],
-            ..Default::default()
-        };
-        let mut failed = HashMap::new();
-        failed.insert("a".to_string(), "boom".to_string());
-        assert!(l.needs_attention(&l.apps[0], &failed));
-        assert_eq!(l.visible_rows(&failed), vec![0]);
+        assert_eq!(l.visible_rows(), vec![0, 1, 2]);
+        l.filter_installed = true;
+        assert_eq!(l.visible_rows(), vec![0, 2]);
     }
 
     #[test]
@@ -509,15 +483,15 @@ mod tests {
             ],
             ..Default::default()
         };
-        l.filter_attention = true; // hides row 0; App clamps right after `o`
-        l.clamp_selection(&no_fail());
-        assert_eq!(l.sel, 1, "clamped onto the first visible row");
-        l.move_sel(1, &no_fail());
-        assert_eq!(l.sel, 2);
-        l.move_sel(1, &no_fail());
+        l.filter_installed = true; // hides row 1; App clamps right after `o`
+        l.clamp_selection();
+        assert_eq!(l.sel, 0, "row 0 is installed: it stays");
+        l.move_sel(1);
+        assert_eq!(l.sel, 2, "skips the hidden row");
+        l.move_sel(1);
         assert_eq!(l.sel, 2, "clamped at the last visible row");
-        l.move_sel(-10, &no_fail());
-        assert_eq!(l.sel, 1, "clamped at the first visible row");
+        l.move_sel(-10);
+        assert_eq!(l.sel, 0, "clamped at the first visible row");
     }
 
     #[test]
@@ -528,26 +502,26 @@ mod tests {
                 info("b", false, false, None),
                 info("c", true, true, Some(1)),
             ],
-            sel: 0,
+            sel: 1,
             ..Default::default()
         };
-        l.filter_attention = true;
-        l.clamp_selection(&no_fail());
-        assert_eq!(l.sel, 1, "moves forward to the first visible row");
-        l.sel = 2;
-        l.clamp_selection(&no_fail());
-        assert_eq!(l.sel, 2, "already visible: stays");
+        l.filter_installed = true;
+        l.clamp_selection();
+        assert_eq!(l.sel, 2, "moves forward to the first visible row");
+        l.sel = 0;
+        l.clamp_selection();
+        assert_eq!(l.sel, 0, "already visible: stays");
     }
 
     #[test]
-    fn clamp_selection_drops_the_filter_when_nothing_needs_attention() {
+    fn clamp_selection_drops_the_filter_when_nothing_is_installed() {
         let mut l = ListComponent {
-            apps: vec![info("a", true, true, Some(0))],
-            filter_attention: true,
+            apps: vec![info("a", false, false, None)],
+            filter_installed: true,
             ..Default::default()
         };
-        l.clamp_selection(&no_fail());
-        assert!(!l.filter_attention, "an empty view must not trap the user");
+        l.clamp_selection();
+        assert!(!l.filter_installed, "an empty view must not trap the user");
         assert_eq!(l.sel, 0);
     }
 

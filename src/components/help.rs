@@ -78,7 +78,7 @@ pub fn render_help_card(frame: &mut Frame, area: Rect, s: Sty, scroll: usize) {
         Line::from("  g / G, Home/End first / last app"),
         Line::from("  → / l            open a description under the app"),
         Line::from("  ← / h            close it again"),
-        Line::from("  o               attention only (hide apps that are fine)"),
+        Line::from("  o               installed only (hide the rest)"),
         Line::from("  /               search by name — Enter keeps, Esc clears"),
         Line::from("  t               track releases — rows and u follow tags"),
         Line::from(""),
@@ -256,7 +256,7 @@ mod tests {
         let joined = render(&app, 100, 30).join("\n");
         assert!(joined.contains("Esc to close"));
         assert!(joined.contains("Navigation"));
-        assert!(joined.contains("attention only"));
+        assert!(joined.contains("installed only"));
         assert!(
             joined.contains("pick the row; press again to unpick"),
             "every hint needs a description: {joined:?}"
@@ -313,10 +313,7 @@ mod tests {
         // first screen: nothing wraps at 60 columns (every line fits 58)
         let top = render(&app, 60, 15).join("\n");
         assert!(top.contains("Navigation"), "{top:?}");
-        assert!(
-            top.contains("attention only (hide apps that are fine)"),
-            "{top:?}"
-        );
+        assert!(top.contains("installed only (hide the rest)"), "{top:?}");
         // scrolled to the end: the legend is reachable too, and the offset clamps
         app.help.scroll = 99;
         let bottom = render(&app, 60, 15).join("\n");

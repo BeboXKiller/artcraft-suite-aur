@@ -63,7 +63,7 @@ fn compact_progress(p: &engine::Progress) -> Option<String> {
 }
 
 pub struct App {
-    /// suite rows, highlight, picks and the attention filter
+    /// suite rows, highlight, picks and the installed filter
     pub list: ListComponent,
     /// running/queued/failed tasks and their live progress
     pub tasks: TaskManager,
@@ -170,7 +170,7 @@ impl App {
                 }
             }
         }
-        // a rescan can take the highlighted row out of the attention filter
+        // a rescan can take the highlighted row out of the installed filter
         self.clamp_selection();
         changed
     }
@@ -220,7 +220,7 @@ impl App {
                 status: &status,
                 tone,
                 apps: &self.list.apps,
-                filter_attention: self.list.filter_attention,
+                filter_installed: self.list.filter_installed,
                 track: self.track,
                 tasks: &self.tasks,
             },
@@ -492,16 +492,16 @@ impl App {
                 self.list.search_editing = true;
             }
             Char('o') => {
-                self.list.filter_attention = !self.list.filter_attention;
+                self.list.filter_installed = !self.list.filter_installed;
                 self.clamp_selection();
-                self.msg = if !self.list.filter_attention {
+                self.msg = if !self.list.filter_installed {
                     "filter cleared".into()
                 } else {
                     let shown = self.visible_rows().len();
                     if shown == 0 {
-                        "✓ nothing needs attention".into()
+                        "✓ no apps installed yet".into()
                     } else {
-                        format!("filter: needs attention ({shown} shown)")
+                        format!("filter: installed only ({shown} shown)")
                     }
                 };
             }
@@ -528,12 +528,12 @@ impl App {
 
     /// Rows the list currently shows — see [`ListComponent::visible_rows`].
     pub fn visible_rows(&self) -> Vec<usize> {
-        self.list.visible_rows(&self.tasks.failed)
+        self.list.visible_rows()
     }
 
     /// Step the highlight by `step` rows *within what is visible*.
     fn move_sel(&mut self, step: isize) {
-        self.list.move_sel(step, &self.tasks.failed);
+        self.list.move_sel(step);
     }
 
     /// Mouse wheel in normal mode: one row per notch. Overlays keep the
@@ -547,7 +547,7 @@ impl App {
 
     /// Keep the highlight on a row the list is actually showing.
     fn clamp_selection(&mut self) {
-        self.list.clamp_selection(&self.tasks.failed);
+        self.list.clamp_selection();
     }
 
     fn request_quit(&mut self) {
@@ -1113,33 +1113,26 @@ mod tests {
     }
 
     #[test]
-    fn empty_attention_filter_explains_itself_inside_the_list() {
-        // every row up to date — the filter has nothing to keep
-        let healthy = || {
-            vec![
-                one("a", true, true, Some(0)),
-                one("b", true, true, Some(0)),
-                one("c", true, true, Some(0)),
-            ]
-        };
-        let mut a = App::with_apps(healthy());
-        a.list.filter_attention = true;
+    fn empty_installed_filter_explains_itself_inside_the_list() {
+        // nothing is installed — the filter has nothing to keep
+        let mut a = App::with_apps(apps(3));
+        a.list.filter_installed = true;
         a.msg.clear(); // only the pane itself may carry the words
         let rows = render(&a, 80, 24).join("\n");
         assert!(
-            rows.contains("nothing needs attention"),
+            rows.contains("no apps installed yet"),
             "empty pane, no explanation: {rows:?}"
         );
         assert!(
-            rows.contains("attention only"),
+            rows.contains("installed only"),
             "title cue missing: {rows:?}"
         );
 
         // unfiltered: the rows are back and the empty-state line is gone
-        a.list.filter_attention = false;
+        a.list.filter_installed = false;
         let rows = render(&a, 80, 24).join("\n");
         assert!(
-            !rows.contains("nothing needs attention"),
+            !rows.contains("no apps installed yet"),
             "empty-state line leaked into a populated list: {rows:?}"
         );
         assert!(rows.contains('□'), "rows missing: {rows:?}");
@@ -1340,44 +1333,25 @@ mod tests {
     }
 
     #[test]
-    fn attention_filter_hides_current_rows_and_clamps_the_highlight() {
+    fn installed_filter_hides_missing_rows_and_clamps_the_highlight() {
         let mut app = App::with_apps(vec![
             one("a", true, true, Some(0)),
             one("b", true, true, Some(2)),
             one("c", false, false, None),
         ]);
+        app.list.sel = 2;
         app.on_key(key(KeyCode::Char('o')));
-        assert!(app.list.filter_attention);
-        assert_eq!(app.visible_rows(), vec![1, 2]);
+        assert!(app.list.filter_installed);
+        assert_eq!(app.visible_rows(), vec![0, 1]);
         assert_eq!(app.list.sel, 1, "highlight must move onto a visible row");
         app.on_key(key(KeyCode::Char('j')));
-        assert_eq!(app.list.sel, 2);
-        app.on_key(key(KeyCode::Char('j')));
         assert_eq!(
-            app.list.sel, 2,
+            app.list.sel, 1,
             "the highlight stops at the last visible row"
         );
         app.on_key(key(KeyCode::Char('o')));
-        assert!(!app.list.filter_attention);
+        assert!(!app.list.filter_installed);
         assert_eq!(app.visible_rows(), vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn failed_tasks_count_as_needing_attention() {
-        let mut app = App::with_apps(vec![one("a", true, true, Some(0))]);
-        assert!(
-            !app.list
-                .needs_attention(&app.list.apps[0], &app.tasks.failed)
-        );
-        app.tasks
-            .failed
-            .insert("a".into(), "cargo build failed".into());
-        assert!(
-            app.list
-                .needs_attention(&app.list.apps[0], &app.tasks.failed)
-        );
-        app.on_key(key(KeyCode::Char('o')));
-        assert_eq!(app.visible_rows(), vec![0]);
     }
 
     /// `t` flips the mode and announces it; the real key also re-checks every
@@ -1620,23 +1594,25 @@ mod tests {
     }
 
     #[test]
-    fn the_attention_filter_keeps_unchecked_clones() {
-        let mut a = app(); // photocraft: checked, up to date
-        a.list.apps.push(one("wordcraft", true, true, None));
-        assert!(
-            a.list.needs_attention(&a.list.apps[1], &Default::default()),
-            "an unchecked clone still needs checking"
-        );
+    fn installed_filter_hides_only_what_is_not_installed() {
+        let mut a = app(); // photocraft: installed
+        a.list.apps.push(one("wordcraft", true, true, None)); // unchecked, installed
+        a.list.apps.push(one("cadcraft", false, false, None)); // missing
         a.on_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('o'),
             crossterm::event::KeyModifiers::NONE,
         ));
-        assert_eq!(a.visible_rows(), vec![1], "only the unchecked clone stays");
+        assert_eq!(
+            a.visible_rows(),
+            vec![0, 1],
+            "installed rows — even unchecked ones — stay"
+        );
+        assert!(!a.visible_rows().contains(&2), "the missing row must hide");
     }
 
     /// The vectorcraft regression: the clone sat on 0.12.0, the binary was
     /// 0.11.0, and the row said "up to date". A stale install must announce
-    /// itself, leave the up-to-date counter, and stay in the attention view.
+    /// itself, leave the up-to-date counter, and stay under the `o` filter.
     #[test]
     fn a_stale_install_says_update_ready_not_up_to_date() {
         let mut a = app(); // photocraft: behind 0, built from the same HEAD
@@ -1668,12 +1644,16 @@ mod tests {
             "{joined:?}"
         );
         assert!(joined.contains("u rebuilds it"), "{joined:?}");
-        // and the attention filter keeps it
+        // and the installed filter keeps it
         a.on_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('o'),
             crossterm::event::KeyModifiers::NONE,
         ));
-        assert_eq!(a.visible_rows(), vec![1], "the stale install stays");
+        assert_eq!(
+            a.visible_rows(),
+            vec![0, 1],
+            "installed rows stay under the filter"
+        );
     }
 
     #[test]
@@ -1775,25 +1755,25 @@ mod tests {
     }
 
     #[test]
-    fn attention_filter_shows_only_what_needs_it() {
-        let mut a = app(); // photocraft: up to date
-        a.list.apps.push(one("wordcraft", true, true, Some(2)));
-        a.list.apps.push(one("cadcraft", false, false, None));
+    fn installed_filter_shows_only_installed_rows() {
+        let mut a = app(); // photocraft: installed
+        a.list.apps.push(one("wordcraft", true, true, Some(2))); // installed, behind
+        a.list.apps.push(one("cadcraft", false, false, None)); // missing
         a.list.sel = 0;
         a.on_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('o'),
             crossterm::event::KeyModifiers::NONE,
         ));
-        assert!(a.list.filter_attention);
-        assert_eq!(a.visible_rows(), vec![1, 2], "up-to-date row must hide");
-        assert_eq!(a.list.sel, 1, "the highlight must land on a visible row");
+        assert!(a.list.filter_installed);
+        assert_eq!(a.visible_rows(), vec![0, 1], "installed rows stay");
+        assert_eq!(a.list.sel, 0, "the highlight must land on a visible row");
         let rows = render(&a, 80, 24);
         assert!(
-            rows.iter().any(|r| r.contains("attention only")),
+            rows.iter().any(|r| r.contains("installed only")),
             "the active filter must be visible: {rows:?}"
         );
         assert!(
-            !rows.iter().any(|r| r.contains("photocraft")),
+            !rows.iter().any(|r| r.contains("cadcraft")),
             "filtered-out row still rendered: {rows:?}"
         );
     }

@@ -90,7 +90,7 @@ Any key that is not `q`/`Esc` clears `confirm_quit`.
 | U | try_start Update on every cloned repo + "update queued" / "nothing to update" |
 | a | try_start Install on every not-installed repo + message |
 | r | `rescan_all()` + "refreshing…" |
-| o | toggle `filter_attention`, `clamp_selection`, message: "filter cleared" / "filter: needs attention (n shown)" / "✓ nothing needs attention" |
+| o | toggle `filter_installed` (installed rows only), `clamp_selection`, message: "filter cleared" / "filter: installed only (n shown)" / "✓ no apps installed yet" |
 | t | flip `track` (commits ↔ releases), `rescan_all()`, message "tracking releases\|commits — re-checking…" |
 | anything else | ignored |
 
@@ -110,14 +110,16 @@ Any key that is not `q`/`Esc` clears `confirm_quit`.
 - Border title " ArtCraft Suite ", one status line inside, right-aligned
   summary counters on the top border (no duplicate inner title line).
 - Summary counters: `✓ up`, `↑ behind`, `· missing`; `? unchecked` only when >
-  0; `attention` badge while the filter is on; `⚑ releases` badge on the
+  0; `installed` badge while the filter is on; `⚑ releases` badge on the
   releases track; `⚙ n/max` only while builds run.
 - Status line text colored by tone→tint (message tone mapping preserved).
 
 ### 2.3 List
 
-- Title: ` Apps (n) · k picked · attention only · /query ` (suffix parts
+- Title: ` Apps (n) · k picked · installed only · /query ` (suffix parts
   conditional; a `▌` marks the search line while it has the keyboard).
+- The `o` filter keeps the installed rows and hides the rest; with nothing
+  installed the pane says `no apps installed yet — o shows everything`.
 - Search: `/` focuses the search line; typing filters rows by repo name
   (case-insensitive), Backspace edits, Enter keeps the filter, Esc clears it —
   while typing and, with a standing filter, in normal mode too.

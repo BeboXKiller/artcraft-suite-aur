@@ -23,7 +23,7 @@ pub struct HeaderView<'a> {
     pub status: &'a str,
     pub tone: Tone,
     pub apps: &'a [AppInfo],
-    pub filter_attention: bool,
+    pub filter_installed: bool,
     pub track: Track,
     pub tasks: &'a TaskManager,
 }
@@ -45,7 +45,7 @@ impl HeaderComponent {
         let mut head_block = Block::bordered().title(" ArtCraft Suite ");
         let summary = summary(
             view.apps,
-            view.filter_attention,
+            view.filter_installed,
             view.track,
             &view.tasks.busy,
             view.tasks.max_parallel,
@@ -61,7 +61,7 @@ impl HeaderComponent {
 /// Right-aligned header counters: how much is current, behind, or missing.
 fn summary(
     apps: &[AppInfo],
-    filter_attention: bool,
+    installed_only: bool,
     track: Track,
     busy: &std::collections::HashMap<String, String>,
     max_parallel: usize,
@@ -94,8 +94,8 @@ fn summary(
     if unchecked > 0 {
         spans.push(Span::styled(format!(" ? {unchecked} "), s.fg(Tint::Muted)));
     }
-    if filter_attention {
-        spans.push(Span::styled(" attention ", s.fg(Tint::Accent).bold()));
+    if installed_only {
+        spans.push(Span::styled(" installed ", s.fg(Tint::Accent).bold()));
     }
     if track == Track::Releases {
         spans.push(Span::styled(" ⚑ releases ", s.fg(Tint::Accent)));

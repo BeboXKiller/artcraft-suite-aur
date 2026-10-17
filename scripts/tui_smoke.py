@@ -176,7 +176,7 @@ print(stages["help"])
 print("===== after two picks =====")
 for line in stages["pick_two"].splitlines()[:5]:
     print(line)
-print("===== attention filter on =====")
+print("===== installed filter on =====")
 for line in stages["filter_on"].splitlines()[:6]:
     print(line)
 print("===== after x (status feedback) =====")
@@ -203,8 +203,8 @@ checks = [
                   "not checked")
     )),
     ("key bar row 1", "[Space] pick" in stages["startup"]
-     and "[Ctrl+Space] pick more" in stages["startup"] and "[o] attention" in stages["startup"]),
-    ("key bar row 1 not clipped", stages["startup"].splitlines()[-3].rstrip().endswith("attention")),
+     and "[Ctrl+Space] pick more" in stages["startup"] and "[o] installed" in stages["startup"]),
+    ("key bar row 1 not clipped", stages["startup"].splitlines()[-3].rstrip().endswith("installed")),
     ("key bar row 2", "[q] quit" in stages["startup"] and "[j/k] move" in stages["startup"]
      and "[→] details" in stages["startup"] and "[←] close" in stages["startup"]),
     ("key bar row 2 not clipped", stages["startup"].splitlines()[-2].rstrip().endswith("quit")),
@@ -229,9 +229,9 @@ checks = [
      and "up to date" in stages["help_scrolled"]
      and "Navigation" not in stages["help_scrolled"]),
     ("help closes on Esc", "Esc to close" not in stages["help_closed"]),
-    ("attention filter engages", "attention only" in stages["filter_on"]
-     or "nothing needs attention" in stages["filter_on"]),
-    ("attention filter clears", "attention only" not in stages["filter_off"]),
+    ("installed filter engages", "installed only" in stages["filter_on"]
+     or "no apps installed yet" in stages["filter_on"]),
+    ("installed filter clears", "installed only" not in stages["filter_off"]),
     ("jobs popup opens with the warning", "Parallel builds" in stages["jobs_popup"]
      and "Stick to 1–2" in stages["jobs_popup"]),
     ("jobs popup closes on Esc", "Parallel builds" not in stages["jobs_closed"]),

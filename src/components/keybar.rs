@@ -28,7 +28,7 @@ const PICK: &[Hint] = &[
     hint("[Ctrl+Space]", "pick more"),
     hint("[Enter]", "open"),
     hint("[u]", "update"),
-    hint("[o]", "attention"),
+    hint("[o]", "installed"),
 ];
 const NAV: &[Hint] = &[
     hint("[j/k]", "move"),
@@ -54,7 +54,7 @@ const PICK_NARROW: &[Hint] = &[
     hint("[Space]", "pick"),
     hint("[Enter]", "open"),
     hint("[u]", "update"),
-    hint("[o]", "attention"),
+    hint("[o]", "installed"),
 ];
 const NAV_NARROW: &[Hint] = &[
     hint("[j/k]", "move"),
@@ -175,11 +175,11 @@ mod tests {
             "multi-pick hint missing: {row1:?}"
         );
         assert!(
-            row1.contains("[o] attention"),
+            row1.contains("[o] installed"),
             "filter hint missing: {row1:?}"
         );
         assert!(
-            row1.trim_end().ends_with("attention"),
+            row1.trim_end().ends_with("installed"),
             "row 1 was clipped at 80 columns: {row1:?}"
         );
         assert!(
@@ -255,7 +255,7 @@ mod tests {
             "[Space] pick",
             "[Enter] open",
             "[u] update",
-            "[o] attention",
+            "[o] installed",
             "[j/k] move",
             "[q] quit",
             "[U] update all",
